@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background: #13131b;
+  color: #e4e1ed;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+.font-display {
+  font-family: "Plus Jakarta Sans", Inter, sans-serif;
+}
+
+video {
+  background: #0c0c12;
+}
