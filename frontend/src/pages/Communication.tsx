@@ -45,19 +45,9 @@ export function Communication() {
   // Join signaling session + wire initiator offer triggers
   useEffect(() => {
     if (!sessionId) return;
-    console.log("[DEBUG] Communication mount: join effect", {
-      sessionId,
-      socketId: socket.id,
-    });
 
     const onJoined = (payload: SessionJoinedEvent) => {
       if (payload.sessionId !== sessionId) return;
-      console.log("[DEBUG] session-joined received", {
-        sessionId,
-        socketId: socket.id,
-        peerCount: payload.peerCount,
-        initiator: payload.initiator,
-      });
       setJoined(true);
       setSessionError(null);
       if (typeof payload.initiator === "boolean") {
@@ -65,22 +55,11 @@ export function Communication() {
       }
       const effective = payload.initiator ?? initiatorRef.current;
       if (payload.peerCount === 2 && effective) {
-        console.log("[DEBUG] peer-joined received (via session-joined count=2), triggering offer", {
-          sessionId,
-          socketId: socket.id,
-        });
         setTimeout(() => void sendOfferRef.current(), 400);
-      } else if (payload.peerCount < 2) {
-        console.log("[WebRTC] Waiting for remote peer");
       }
     };
     const onPeerJoined = (payload: PeerJoinedEvent) => {
       if (payload.sessionId !== sessionId) return;
-      console.log("[DEBUG] peer-joined received", {
-        sessionId,
-        socketId: socket.id,
-        peerCount: payload.peerCount,
-      });
       peer.setConnectionState("connecting");
       if (initiatorRef.current) {
         setTimeout(() => void sendOfferRef.current(), 400);
@@ -93,10 +72,6 @@ export function Communication() {
     };
     const onPeerLeft = (payload: { sessionId: string }) => {
       if (payload.sessionId !== sessionId) return;
-      console.log("[DEBUG] peer-left received (Communication)", {
-        sessionId,
-        socketId: socket.id,
-      });
       peer.setConnectionState("ended");
     };
 
@@ -108,10 +83,6 @@ export function Communication() {
     socket.emit("join-session", { sessionId });
 
     return () => {
-      console.log("[DEBUG] Communication unmount: join effect cleanup", {
-        sessionId,
-        socketId: socket.id,
-      });
       socket.off("session-joined", onJoined);
       socket.off("peer-joined", onPeerJoined);
       socket.off("session-error", onSessionError);
@@ -119,6 +90,21 @@ export function Communication() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, socket]);
+
+  // Offer retry: the one-shot triggers above can be lost (remount gaps,
+  // throttle suppression, role learned late). Until the chat channel opens,
+  // keep offering so a lost offer never leaves the PC stuck at "connecting".
+  useEffect(() => {
+    if (!joined || !effectiveInitiator) return;
+    if (peer.channelOpen) return;
+    const fire = () => {
+      void sendOfferRef.current();
+    };
+    fire();
+    const id = window.setInterval(fire, 2500);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [joined, effectiveInitiator, peer.channelOpen, peer.connectionState, sessionId]);
 
   // Start local media once (non-blocking; chat/files work without it)
   useEffect(() => {
@@ -143,19 +129,11 @@ export function Communication() {
   // effect. This effect must NOT close it — doing so killed the just-created
   // PC on StrictMode remount / every sessionId re-run (create -> cleanup loop).
   useEffect(() => {
-    console.log("[DEBUG] Communication mount: cleanup effect registered", {
-      sessionId,
-      socketId: socket.id,
-    });
     const leave = () => {
       socket.emit("leave-session", { sessionId });
     };
     window.addEventListener("beforeunload", leave);
     return () => {
-      console.log("[DEBUG] Communication unmount: leave + media stop (PC owned by useWebRTC)", {
-        sessionId,
-        socketId: socket.id,
-      });
       window.removeEventListener("beforeunload", leave);
       leave();
       media.stop();
@@ -164,13 +142,6 @@ export function Communication() {
   }, [sessionId]);
 
   const handleEnd = useCallback(() => {
-    console.log("[DEBUG] WEBRTC CLEANUP CALLED", {
-      reason: "handleEnd (user ended session)",
-      sessionId,
-      socketId: socket.id,
-      connectionState: peer.managerRef.current?.pc?.connectionState ?? null,
-      iceConnectionState: peer.managerRef.current?.pc?.iceConnectionState ?? null,
-    });
     socket.emit("leave-session", { sessionId });
     media.stop();
     peer.managerRef.current?.cleanup("handleEnd");
@@ -288,6 +259,11 @@ export function Communication() {
             onAttach={openFilePicker}
             disabled={!peer.channelOpen}
           />
+          <p className="border-t border-border px-4 py-1.5 font-mono text-[10px] leading-relaxed text-muted/60">
+            sock={socket.connected ? "up" : "down"} joined={String(joined)} init=
+            {String(effectiveInitiator)} pc={peer.connectionState} chat={peer.chatState} file=
+            {peer.fileState} ch={peer.channelOpen ? "open" : "shut"}
+          </p>
           <input
             ref={fileInputRef}
             type="file"

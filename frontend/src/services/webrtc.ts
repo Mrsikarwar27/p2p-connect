@@ -11,8 +11,8 @@ export type StateHandler = (state: RTCPeerConnectionState) => void;
 export type ChannelHandler = (channel: RTCDataChannel) => void;
 export type ChannelStateHandler = (label: string, state: RTCDataChannelState) => void;
 
-function log(...args: unknown[]): void {
-  console.log("[WebRTC]", ...args);
+function log(..._args: unknown[]): void {
+  // Inspect console noise removed — intentionally no-op.
 }
 
 export class PeerConnectionManager {
@@ -39,14 +39,9 @@ export class PeerConnectionManager {
 
   create(isInitiator: boolean): RTCPeerConnection {
     if (this.pc || this.chatChannel || this.fileChannel) {
-      console.log("[DEBUG] WEBRTC CLEANUP CALLED", {
-        reason: "create-entering (replacing existing PC)",
-        connectionState: this.pc?.connectionState ?? null,
-        iceConnectionState: this.pc?.iceConnectionState ?? null,
-      });
       this.cleanup("create-entering");
     }
-    log("Creating RTCPeerConnection", `initiator=${isInitiator}`);
+    log();
     this.pc = new RTCPeerConnection(getRtcConfig());
     this.remoteCandidates = [];
 
@@ -224,12 +219,7 @@ export class PeerConnectionManager {
     return this.fileChannel?.readyState === "open";
   }
 
-  cleanup(reason = "unknown"): void {
-    console.log("[DEBUG] WEBRTC CLEANUP CALLED", {
-      reason,
-      connectionState: this.pc?.connectionState ?? null,
-      iceConnectionState: this.pc?.iceConnectionState ?? null,
-    });
+  cleanup(_reason = "unknown"): void {
     for (const ch of [this.chatChannel, this.fileChannel]) {
       try {
         ch?.close();

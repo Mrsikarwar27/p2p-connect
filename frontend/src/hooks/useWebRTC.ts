@@ -179,7 +179,6 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
       }
       channel.onmessage = handleDataMessage;
       channel.onopen = () => {
-        console.log(`[WebRTC] DataChannel opened: ${label}`);
         if (isChat) {
           setChatState("open");
           setChannelOpen(true);
@@ -192,7 +191,6 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
         }
       };
       channel.onclose = () => {
-        console.log(`[WebRTC] DataChannel closed: ${label}`);
         if (isChat) {
           setChatState("closed");
           setChannelOpen(false);
@@ -246,10 +244,7 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
       manager.ensureDataChannels(true);
       if (manager.chatChannel) bindChannel(manager.chatChannel);
       if (manager.fileChannel) bindChannel(manager.fileChannel);
-      console.log("[WebRTC] Creating offer");
       const offer = await manager.createOffer();
-      console.log("[DEBUG] offer created", { sessionId, socketId: socket.id });
-      console.log("[WebRTC] Offer sent");
       socket.emit("webrtc-offer", { sessionId, offer });
     } catch (err) {
       console.error("Failed to create offer", err);
@@ -260,12 +255,6 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
 
   // Main setup effect — exactly ONE RTCPeerConnection per mount.
   useEffect(() => {
-    console.log("[DEBUG] useWebRTC mount: WebRTC initialization starts", {
-      sessionId,
-      socketId: socket.id,
-      isInitiator: roleRef.current,
-    });
-    console.log("[WebRTC] Creating RTCPeerConnection");
     const manager = new PeerConnectionManager();
     managerRef.current = manager;
 
@@ -273,8 +262,6 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
     setRemoteStream(remoteMediaRef.current);
 
     manager.onIceCandidate = (candidate) => {
-      console.log("[DEBUG] ICE candidate sent", { sessionId, socketId: socket.id });
-      console.log("[WebRTC] ICE candidate sent");
       socket.emit("ice-candidate", {
         sessionId,
         candidate: candidate.toJSON(),
@@ -307,11 +294,6 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
     manager.onChannelOpen = () => setChannelOpen(true);
 
     const pc = manager.create(roleRef.current);
-    console.log("[DEBUG] RTCPeerConnection created", {
-      sessionId,
-      socketId: socket.id,
-      isInitiator: roleRef.current,
-    });
     pc.onnegotiationneeded = () => {
       // Only the initiator renegotiates to avoid glare.
       if (!roleRef.current) return;
@@ -347,9 +329,7 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
 
     const onOffer = async (payload: OfferEvent) => {
       if (payload.sessionId !== sessionId) return;
-      console.log("[DEBUG] offer received", { sessionId, socketId: socket.id });
       try {
-        console.log("[WebRTC] Offer received");
         // Ensure local tracks attached before answering
         if (localStreamRef.current && manager.pc) {
           const existing = new Set(
@@ -366,8 +346,6 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
           }
         }
         const answer = await manager.handleOffer(payload.offer);
-        console.log("[DEBUG] answer created", { sessionId, socketId: socket.id });
-        console.log("[WebRTC] Answer sent");
         socket.emit("webrtc-answer", { sessionId, answer });
         setConnectionState("connecting");
       } catch (err) {
@@ -379,11 +357,8 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
 
     const onAnswer = async (payload: AnswerEvent) => {
       if (payload.sessionId !== sessionId) return;
-      console.log("[DEBUG] answer received", { sessionId, socketId: socket.id });
       try {
-        console.log("[WebRTC] Answer received");
         await manager.handleAnswer(payload.answer);
-        console.log("[WebRTC] Answer applied");
       } catch (err) {
         console.error("handleAnswer failed", err);
         setError("Failed to establish connection.");
@@ -393,15 +368,11 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
 
     const onIce = (payload: IceEvent) => {
       if (payload.sessionId !== sessionId) return;
-      console.log("[DEBUG] ICE candidate received", { sessionId, socketId: socket.id });
-      console.log("[WebRTC] ICE candidate received");
       void manager.addIceCandidate(payload.candidate);
     };
 
     const onPeerLeft = (payload: PeerLeftEvent) => {
       if (payload.sessionId !== sessionId) return;
-      console.log("[DEBUG] peer-left received", { sessionId, socketId: socket.id });
-      console.log("[WebRTC] Peer disconnected");
       setConnectionState("ended");
       setChannelOpen(false);
       setChatState("closed");
@@ -419,21 +390,10 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
     // Initiator creates offer immediately if peer already present is handled by caller.
     // Caller should invoke sendOffer() when peer-joined arrives (or right away for joiner retry).
     return () => {
-      console.log("[DEBUG] useWebRTC unmount: effect cleanup", {
-        sessionId,
-        socketId: socket.id,
-      });
       socket.off("webrtc-offer", onOffer);
       socket.off("webrtc-answer", onAnswer);
       socket.off("ice-candidate", onIce);
       socket.off("peer-left", onPeerLeft);
-      console.log("[DEBUG] WEBRTC CLEANUP CALLED", {
-        reason: "useWebRTC-effect-cleanup",
-        sessionId,
-        socketId: socket.id,
-        connectionState: manager.pc?.connectionState ?? null,
-        iceConnectionState: manager.pc?.iceConnectionState ?? null,
-      });
       manager.cleanup("useWebRTC-effect-cleanup");
       managerRef.current = null;
     };

@@ -6,7 +6,7 @@ export function MessageInput({
   onAttach,
   disabled,
 }: {
-  onSend: (text: string) => void;
+  onSend: (text: string) => boolean;
   onAttach: () => void;
   disabled: boolean;
 }) {
@@ -14,8 +14,8 @@ export function MessageInput({
 
   const submit = () => {
     if (!value.trim()) return;
-    onSend(value);
-    setValue("");
+    const ok = onSend(value);
+    if (ok) setValue("");
   };
 
   return (
