@@ -22,6 +22,7 @@ export function normalizeSessionId(input: string): string {
 export class SessionManager {
   private sessions = new Map<string, Session>();
   private socketToSession = new Map<string, string>();
+  private cleanupTimers = new Map<string, NodeJS.Timeout>();
 
   create(): Session {
     let id = generateSessionId();
@@ -39,6 +40,10 @@ export class SessionManager {
 
   addPeer(sessionId: string, socketId: string): { ok: true; session: Session } | { ok: false; reason: "invalid" | "full" } {
     const id = normalizeSessionId(sessionId);
+    if (this.cleanupTimers.has(id)) {
+      clearTimeout(this.cleanupTimers.get(id));
+      this.cleanupTimers.delete(id);
+    }
     const session = this.sessions.get(id);
     if (!session) return { ok: false, reason: "invalid" };
     if (session.peers.includes(socketId)) return { ok: true, session };
@@ -56,7 +61,17 @@ export class SessionManager {
     if (!session) return undefined;
     session.peers = session.peers.filter((id) => id !== socketId);
     if (session.peers.length === 0) {
-      this.sessions.delete(sessionId);
+      if (this.cleanupTimers.has(sessionId)) {
+        clearTimeout(this.cleanupTimers.get(sessionId));
+      }
+      const timer = setTimeout(() => {
+        const s = this.sessions.get(sessionId);
+        if (s && s.peers.length === 0) {
+          this.sessions.delete(sessionId);
+        }
+        this.cleanupTimers.delete(sessionId);
+      }, 30000);
+      this.cleanupTimers.set(sessionId, timer);
     }
     return session;
   }
