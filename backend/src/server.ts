@@ -30,6 +30,8 @@ const io = new Server(httpServer, {
     origin: env.clientUrl,
     methods: ["GET", "POST"],
   },
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
 const sessions = new SessionManager();

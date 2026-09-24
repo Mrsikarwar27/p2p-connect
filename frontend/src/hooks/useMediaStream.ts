@@ -63,9 +63,25 @@ export function useMediaStream(): MediaState & {
           break;
         case "NotReadableError":
         case "AbortError":
-          setError(
-            "Camera or microphone exists but is currently unavailable or being used by another application. Please close other apps using it and try again. You can still use chat and file sharing.",
-          );
+          try {
+            const audioStream = await navigator.mediaDevices.getUserMedia({
+              video: false,
+              audio: true,
+            });
+            streamRef.current = audioStream;
+            setStream(audioStream);
+            setStarted(true);
+            setMicOn(true);
+            setCameraOn(false);
+            setError(
+              "Camera is being used by another application/tab. Connected with microphone only.",
+            );
+            return audioStream;
+          } catch {
+            setError(
+              "Camera or microphone exists but is currently unavailable or being used by another application. Please close other apps using it and try again. You can still use chat and file sharing.",
+            );
+          }
           break;
         case "SecurityError":
           setError(

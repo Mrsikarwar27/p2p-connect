@@ -129,13 +129,12 @@ export function Communication() {
   // effect. This effect must NOT close it — doing so killed the just-created
   // PC on StrictMode remount / every sessionId re-run (create -> cleanup loop).
   useEffect(() => {
-    const leave = () => {
+    const handleBeforeUnload = () => {
       socket.emit("leave-session", { sessionId });
     };
-    window.addEventListener("beforeunload", leave);
+    window.addEventListener("beforeunload", handleBeforeUnload);
     return () => {
-      window.removeEventListener("beforeunload", leave);
-      leave();
+      window.removeEventListener("beforeunload", handleBeforeUnload);
       media.stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

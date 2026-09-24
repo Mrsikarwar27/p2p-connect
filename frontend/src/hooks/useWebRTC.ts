@@ -419,7 +419,7 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
           }
         }
       }
-      if (added && roleRef.current && pc.localDescription && pc.remoteDescription) {
+      if (added && pc.localDescription && pc.remoteDescription) {
         void (async () => {
           try {
             const offer = await pc.createOffer();
