@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "npm install && npm run build:frontend && tsc -p tsconfig.json",
-    "build:frontend": "cd ../frontend && npm install && npm run build",
+    "build:frontend": "cd ../frontend && npm install --include=dev && npm run build",
     "render-build": "npm run build",
     "start": "node dist/server.js"
   },
