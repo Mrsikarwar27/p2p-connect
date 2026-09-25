@@ -3,7 +3,8 @@ import cors from "cors";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import { fileURLToPath } from "url";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
+import { existsSync } from "fs";
 import { env } from "./config/env.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { SessionManager } from "./socket/sessionManager.js";
@@ -11,7 +12,7 @@ import { setupSignaling } from "./socket/signaling.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const distPath = join(__dirname, "../../frontend/dist");
+const distPath = resolve(__dirname, "../../frontend/dist");
 
 const app = express();
 
@@ -35,7 +36,12 @@ app.get("/health", (_req, res) => {
 // Catch-all: serve index.html for SPA routes (production only)
 if (env.nodeEnv === "production") {
   app.get("*", (_req, res) => {
-    res.sendFile(join(distPath, "index.html"));
+    const indexPath = join(distPath, "index.html");
+    if (existsSync(indexPath)) {
+      res.sendFile(indexPath);
+    } else {
+      res.status(500).send("Frontend not built. Check build output.");
+    }
   });
 }
 
