@@ -51,9 +51,8 @@ export function useMediaStream(): MediaState & {
       switch (name) {
         case "NotFoundError":
         case "OverconstrainedError":
-          setError(
-            "No camera or microphone device was found. Please connect a device and try again. You can still use chat and file sharing.",
-          );
+          // Not a real error — chat/files work without media. Log instead of showing UI error.
+          console.info("No camera/microphone found. Chat and file sharing still available.");
           break;
         case "NotAllowedError":
         case "PermissionDeniedError":
