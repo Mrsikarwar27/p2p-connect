@@ -45,6 +45,7 @@ In Render dashboard → Environment tab, add:
 | `NODE_ENV` | `production` |
 | `PORT` | `10000` (Render requires this) |
 | `CLIENT_URL` | `https://p2p-connect.onrender.com` (replace with your actual URL after first deploy) |
+| `NPM_CONFIG_PRODUCTION` | `false` (installs devDependencies for TypeScript build) |
 
 ### 4. Deploy
 Click **Create Web Service**. First build takes ~3-5 min.
