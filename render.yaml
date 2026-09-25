@@ -8,10 +8,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: "10000"
-      - key: CLIENT_URL
-        value: "https://p2p-connect.onrender.com"
       - key: NPM_CONFIG_PRODUCTION
         value: "false"
+      # PORT is automatically provided by Render
+      # CLIENT_URL: set to your actual Render URL after first deploy (e.g., https://p2p-connect-xyz.onrender.com)
     healthCheckPath: /health
