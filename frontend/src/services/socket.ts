@@ -4,7 +4,10 @@ let socketInstance: Socket | null = null;
 
 export function getSignalingUrl(): string {
   const url = import.meta.env.VITE_SIGNALING_URL as string | undefined;
-  return url ?? "http://localhost:5000";
+  if (url) return url;
+  // In production (served from same origin as backend), use relative URL
+  if (import.meta.env.PROD) return "";
+  return "http://localhost:5000";
 }
 
 export function createSocket(): Socket {
@@ -12,7 +15,8 @@ export function createSocket(): Socket {
   if (socketInstance) {
     socketInstance.disconnect();
   }
-  socketInstance = io(getSignalingUrl(), {
+  const url = getSignalingUrl();
+  socketInstance = io(url, {
     transports: ["websocket", "polling"],
     autoConnect: true,
   });

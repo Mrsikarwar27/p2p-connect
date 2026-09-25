@@ -2,10 +2,16 @@ import express from "express";
 import cors from "cors";
 import { createServer } from "http";
 import { Server } from "socket.io";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 import { env } from "./config/env.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { SessionManager } from "./socket/sessionManager.js";
 import { setupSignaling } from "./socket/signaling.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const distPath = join(__dirname, "../../frontend/dist");
 
 const app = express();
 
@@ -17,9 +23,21 @@ app.use(
 );
 app.use(express.json());
 
+// Serve frontend static files in production
+if (env.nodeEnv === "production") {
+  app.use(express.static(distPath));
+}
+
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "p2p-connect-signaling" });
 });
+
+// Catch-all: serve index.html for SPA routes (production only)
+if (env.nodeEnv === "production") {
+  app.get("*", (_req, res) => {
+    res.sendFile(join(distPath, "index.html"));
+  });
+}
 
 app.use(errorHandler);
 

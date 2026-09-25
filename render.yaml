@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: p2p-connect
+    runtime: node
+    plan: free
+    buildCommand: npm run render-build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: CLIENT_URL
+        value: "https://p2p-connect.onrender.com"
+    healthCheckPath: /health

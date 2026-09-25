@@ -1,11 +1,13 @@
 {
-  "name": "p2p-connect-backend",
+  "name": "p2p-connect",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run build:frontend && tsc -p tsconfig.json",
+    "build:frontend": "cd ../frontend && npm install && npm run build",
+    "render-build": "npm run build",
     "start": "node dist/server.js"
   },
   "dependencies": {
