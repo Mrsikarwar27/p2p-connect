@@ -6,6 +6,7 @@ export interface MediaState {
   cameraOn: boolean;
   error: string | null;
   started: boolean;
+  facingMode: "user" | "environment";
 }
 
 export function useMediaStream(): MediaState & {
@@ -13,13 +14,20 @@ export function useMediaStream(): MediaState & {
   stop: () => void;
   toggleMic: () => void;
   toggleCamera: () => void;
+  switchCamera: () => Promise<void>;
 } {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [micOn, setMicOn] = useState(true);
   const [cameraOn, setCameraOn] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
+  const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
   const streamRef = useRef<MediaStream | null>(null);
+
+  const getConstraints = (facing: "user" | "environment") => ({
+    video: { facingMode: { ideal: facing } },
+    audio: true,
+  });
 
   const start = useCallback(async () => {
     setError(null);
@@ -33,10 +41,7 @@ export function useMediaStream(): MediaState & {
       if (streamRef.current) {
         return streamRef.current;
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-      });
+      const stream = await navigator.mediaDevices.getUserMedia(getConstraints(facingMode));
       streamRef.current = stream;
       setStream(stream);
       setStarted(true);
@@ -51,7 +56,6 @@ export function useMediaStream(): MediaState & {
       switch (name) {
         case "NotFoundError":
         case "OverconstrainedError":
-          // Not a real error — chat/files work without media. Log instead of showing UI error.
           console.info("No camera/microphone found. Chat and file sharing still available.");
           break;
         case "NotAllowedError":
@@ -96,7 +100,7 @@ export function useMediaStream(): MediaState & {
       setStarted(false);
       return null;
     }
-  }, []);
+  }, [facingMode]);
 
   const stop = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => {
@@ -133,6 +137,39 @@ export function useMediaStream(): MediaState & {
     setCameraOn(next);
   }, [cameraOn]);
 
+  const switchCamera = useCallback(async () => {
+    const s = streamRef.current;
+    if (!s) return;
+    const nextFacing = facingMode === "user" ? "environment" : "user";
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia(getConstraints(nextFacing));
+      const newVideoTrack = newStream.getVideoTracks()[0];
+      if (!newVideoTrack) {
+        throw new Error("No video track in new stream");
+      }
+      // Stop old video tracks
+      s.getVideoTracks().forEach((t) => t.stop());
+      // Add new video track to existing stream (preserves audio)
+      s.addTrack(newVideoTrack);
+      setFacingMode(nextFacing);
+      setStream(new MediaStream(s.getTracks())); // trigger re-render
+    } catch (err) {
+      console.warn("Camera switch failed", err);
+      setError("Could not switch camera. This device may not have a rear camera.");
+      // Revert to original camera
+      try {
+        const fallbackStream = await navigator.mediaDevices.getUserMedia(getConstraints(facingMode));
+        const fallbackVideoTrack = fallbackStream.getVideoTracks()[0];
+        if (fallbackVideoTrack) {
+          s.getVideoTracks().forEach((t) => t.stop());
+          s.addTrack(fallbackVideoTrack);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [facingMode]);
+
   useEffect(() => {
     return () => {
       streamRef.current?.getTracks().forEach((t) => {
@@ -145,5 +182,5 @@ export function useMediaStream(): MediaState & {
     };
   }, []);
 
-  return { stream, micOn, cameraOn, error, started, start, stop, toggleMic, toggleCamera };
+  return { stream, micOn, cameraOn, error, started, facingMode, start, stop, toggleMic, toggleCamera, switchCamera };
 }

@@ -1,7 +1,23 @@
+export interface WatchPlaylistItem {
+  videoId: string;
+  title?: string;
+}
+
+export interface WatchState {
+  videoId: string | null;
+  isPlaying: boolean;
+  currentTime: number;
+  playlist: WatchPlaylistItem[];
+  playlistIndex: number;
+  updatedBy: string | null;
+  updatedAt: number;
+}
+
 export interface Session {
   id: string;
   peers: string[];
   peerNames: Map<string, string>;
+  watchState: WatchState;
   createdAt: number;
 }
 

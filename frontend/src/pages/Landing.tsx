@@ -54,7 +54,7 @@ export function Landing() {
     }
     setError(null);
     setCreating(true);
-    socket.emit("create-session");
+    socket.emit("create-session", { name: trimmedName });
   };
 
   const join = () => {

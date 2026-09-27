@@ -437,6 +437,23 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     [sessionId, socket],
   );
 
+  const replaceVideoTrack = useCallback(
+    async (newTrack: MediaStreamTrack) => {
+      const pc = managerRef.current?.pc;
+      if (!pc) return false;
+      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+      if (!sender) return false;
+      try {
+        await sender.replaceTrack(newTrack);
+        return true;
+      } catch (err) {
+        console.error("replaceTrack failed", err);
+        return false;
+      }
+    },
+    [],
+  );
+
   const sendMessage = useCallback(
     (text: string) => {
       const trimmed = text.trim();
@@ -552,6 +569,7 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     cancelTransfer,
     sendOffer,
     setLocalStream,
+    replaceVideoTrack,
     managerRef,
   };
 }

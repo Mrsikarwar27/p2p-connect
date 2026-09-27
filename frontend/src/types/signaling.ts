@@ -18,6 +18,31 @@ export interface PeerJoinedEvent {
   name?: string;
 }
 
+export interface WatchSyncEvent {
+  sessionId: string;
+  action: "load" | "play" | "pause" | "seek" | "state" | "playlist-add" | "playlist-remove" | "playlist-play";
+  videoId?: string | null;
+  currentTime?: number;
+  isPlaying?: boolean;
+  playlist?: WatchPlaylistItem[];
+  playlistIndex?: number;
+  from: string;
+  timestamp: number;
+}
+
+export interface WatchState {
+  videoId: string | null;
+  isPlaying: boolean;
+  currentTime: number;
+  playlist: WatchPlaylistItem[];
+  playlistIndex: number;
+}
+
+export interface WatchPlaylistItem {
+  videoId: string;
+  title?: string;
+}
+
 export interface PeerLeftEvent {
   sessionId: string;
   peerId: string;

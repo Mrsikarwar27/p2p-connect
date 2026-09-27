@@ -1,6 +1,10 @@
 import type { Server, Socket } from "socket.io";
 import { SessionManager, normalizeSessionId } from "./sessionManager.js";
 
+interface CreatePayload {
+  name?: string;
+}
+
 interface JoinPayload {
   sessionId?: string;
   name?: string;
@@ -21,12 +25,21 @@ interface CandidatePayload {
   candidate?: Record<string, unknown>;
 }
 
+interface WatchPayload {
+  sessionId?: string;
+  action: "load" | "play" | "pause" | "seek" | "state" | "playlist-add" | "playlist-remove" | "playlist-play";
+  videoId?: string;
+  currentTime?: number;
+  playlistIndex?: number;
+}
+
 export function setupSignaling(io: Server, sessions: SessionManager): void {
   io.on("connection", (socket: Socket) => {
-    socket.on("create-session", () => {
+    socket.on("create-session", (payload: CreatePayload) => {
+      const name = payload?.name?.trim() ?? "";
       const session = sessions.create();
-      console.log(`[Signaling] Session created: ${session.id} (by ${socket.id})`);
-      const result = sessions.addPeer(session.id, socket.id);
+      console.log(`[Signaling] Session created: ${session.id} (by ${socket.id}) name="${name}"`);
+      const result = sessions.addPeer(session.id, socket.id, name || undefined);
       if (!result.ok) {
         socket.emit("session-error", {
           sessionId: session.id,
@@ -144,6 +157,25 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
         });
       }
       sessions.removeSocket(socket.id);
+    });
+
+    // Watch Together events
+    socket.on("watch:sync", (payload: WatchPayload) => {
+      const rawId = payload?.sessionId ?? "";
+      const sessionId = rawId ? normalizeSessionId(rawId) : undefined;
+      if (!sessionId) return;
+
+      const session = sessions.get(sessionId);
+      if (!session) return;
+
+      // Validate the peer is in this session
+      if (!session.peers.includes(socket.id)) return;
+
+      // Only route to the other peer
+      socket.to(sessionId).emit("watch:sync", {
+        ...payload,
+        from: socket.id,
+      });
     });
 
     socket.on("disconnect", () => {

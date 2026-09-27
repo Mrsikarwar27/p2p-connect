@@ -1,4 +1,4 @@
-import type { Session } from "../types/signaling.js";
+import type { Session, WatchState, WatchPlaylistItem } from "../types/signaling.js";
 
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MAX_PEERS = 2;
@@ -9,6 +9,18 @@ function randomSegment(length: number): string {
     out += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
   }
   return out;
+}
+
+function createDefaultWatchState(): WatchState {
+  return {
+    videoId: null,
+    isPlaying: false,
+    currentTime: 0,
+    playlist: [],
+    playlistIndex: 0,
+    updatedBy: null,
+    updatedAt: 0,
+  };
 }
 
 export function generateSessionId(): string {
@@ -29,7 +41,7 @@ export class SessionManager {
     while (this.sessions.has(id)) {
       id = generateSessionId();
     }
-    const session: Session = { id, peers: [], peerNames: new Map(), createdAt: Date.now() };
+    const session: Session = { id, peers: [], peerNames: new Map(), watchState: createDefaultWatchState(), createdAt: Date.now() };
     this.sessions.set(id, session);
     return session;
   }
@@ -64,6 +76,55 @@ export class SessionManager {
   getPeerName(sessionId: string, socketId: string): string | undefined {
     const session = this.sessions.get(normalizeSessionId(sessionId));
     return session?.peerNames.get(socketId);
+  }
+
+  getWatchState(sessionId: string): WatchState | undefined {
+    const session = this.sessions.get(normalizeSessionId(sessionId));
+    return session?.watchState;
+  }
+
+  setWatchState(sessionId: string, watchState: Partial<WatchState>, updatedBy: string): WatchState | undefined {
+    const session = this.sessions.get(normalizeSessionId(sessionId));
+    if (!session) return undefined;
+    session.watchState = { ...session.watchState, ...watchState, updatedBy, updatedAt: Date.now() };
+    return session.watchState;
+  }
+
+  addToPlaylist(sessionId: string, item: WatchPlaylistItem, socketId: string): WatchPlaylistItem[] | undefined {
+    const session = this.sessions.get(normalizeSessionId(sessionId));
+    if (!session) return undefined;
+    session.watchState.playlist.push(item);
+    session.watchState.updatedBy = socketId;
+    session.watchState.updatedAt = Date.now();
+    return session.watchState.playlist;
+  }
+
+  removeFromPlaylist(sessionId: string, index: number): WatchPlaylistItem[] | undefined {
+    const session = this.sessions.get(normalizeSessionId(sessionId));
+    if (!session) return undefined;
+    if (index >= 0 && index < session.watchState.playlist.length) {
+      session.watchState.playlist.splice(index, 1);
+      if (session.watchState.playlistIndex >= session.watchState.playlist.length) {
+        session.watchState.playlistIndex = Math.max(0, session.watchState.playlist.length - 1);
+      }
+      session.watchState.updatedAt = Date.now();
+    }
+    return session.watchState.playlist;
+  }
+
+  playPlaylistItem(sessionId: string, index: number, socketId: string): { videoId: string; currentTime: number } | undefined {
+    const session = this.sessions.get(normalizeSessionId(sessionId));
+    if (!session) return undefined;
+    if (index >= 0 && index < session.watchState.playlist.length) {
+      session.watchState.playlistIndex = index;
+      session.watchState.videoId = session.watchState.playlist[index].videoId;
+      session.watchState.currentTime = 0;
+      session.watchState.isPlaying = true;
+      session.watchState.updatedBy = socketId;
+      session.watchState.updatedAt = Date.now();
+      return { videoId: session.watchState.videoId, currentTime: 0 };
+    }
+    return undefined;
   }
 
   removeSocket(socketId: string): Session | undefined {

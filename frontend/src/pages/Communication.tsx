@@ -4,9 +4,11 @@ import { ArrowLeft } from "lucide-react";
 import { useSocket } from "../hooks/useSocket";
 import { useMediaStream } from "../hooks/useMediaStream";
 import { useWebRTC } from "../hooks/useWebRTC";
+import { useWatchTogether } from "../hooks/useWatchTogether";
 import { CommunicationLayout } from "../components/communication/CommunicationLayout";
 import { VideoPanel } from "../components/communication/VideoPanel";
 import { VideoControls } from "../components/communication/VideoControls";
+import { WatchTogetherPanel } from "../components/communication/WatchTogetherPanel";
 import { ChatPanel } from "../components/communication/ChatPanel";
 import { MessageInput } from "../components/communication/MessageInput";
 import { FileTransferCard } from "../components/communication/FileTransferCard";
@@ -41,6 +43,8 @@ export function Communication() {
   const [joined, setJoined] = useState(false);
   const [localName, setLocalName] = useState(locationName);
   const [peerName, setPeerName] = useState<string>("");
+  const [isLocalMain, setIsLocalMain] = useState(false);
+  const [showPlaylist, setShowPlaylist] = useState(false);
 
   const peer = useWebRTC({
     socket,
@@ -49,9 +53,35 @@ export function Communication() {
     localName,
     peerName,
   });
+
+  const watch = useWatchTogether({
+    socket,
+    sessionId,
+    localPeerId: socket.id ?? "",
+    peerName,
+  });
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sendOfferRef = useRef(peer.sendOffer);
   sendOfferRef.current = peer.sendOffer;
+
+  const swapVideos = useCallback(() => {
+    setIsLocalMain((prev) => !prev);
+  }, []);
+
+  const handleSwitchCamera = useCallback(async () => {
+    await media.switchCamera();
+    if (media.stream) {
+      const videoTrack = media.stream.getVideoTracks()[0];
+      if (videoTrack) {
+        await peer.replaceVideoTrack(videoTrack);
+      }
+    }
+  }, [media, peer]);
+
+  const handleWatchTogether = useCallback(() => {
+    watch.togglePanel();
+  }, [watch]);
 
   // Join signaling session + wire initiator offer triggers
   useEffect(() => {
@@ -64,7 +94,6 @@ export function Communication() {
       if (typeof payload.initiator === "boolean") {
         setServerInitiator(payload.initiator);
       }
-      // Store names from signaling
       if (payload.name) setLocalName(payload.name);
       if (payload.peerName) setPeerName(payload.peerName);
       const effective = payload.initiator ?? initiatorRef.current;
@@ -75,7 +104,6 @@ export function Communication() {
     const onPeerJoined = (payload: PeerJoinedEvent) => {
       if (payload.sessionId !== sessionId) return;
       peer.setConnectionState("connecting");
-      // Store peer's name when they join
       if (payload.name) setPeerName(payload.name);
       if (initiatorRef.current) {
         setTimeout(() => void sendOfferRef.current(), 400);
@@ -96,7 +124,6 @@ export function Communication() {
     socket.on("session-error", onSessionError);
     socket.on("peer-left", onPeerLeft);
 
-    // Include name in join-session payload
     socket.emit("join-session", { sessionId, name: localName });
 
     return () => {
@@ -105,12 +132,9 @@ export function Communication() {
       socket.off("session-error", onSessionError);
       socket.off("peer-left", onPeerLeft);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, socket, localName]);
 
-  // Offer retry: the one-shot triggers above can be lost (remount gaps,
-  // throttle suppression, role learned late). Until the chat channel opens,
-  // keep offering so a lost offer never leaves the PC stuck at "connecting".
+  // Offer retry
   useEffect(() => {
     if (!joined || !effectiveInitiator) return;
     if (peer.channelOpen) return;
@@ -120,10 +144,9 @@ export function Communication() {
     fire();
     const id = window.setInterval(fire, 2500);
     return () => window.clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [joined, effectiveInitiator, peer.channelOpen, peer.connectionState, sessionId]);
 
-  // Start local media once (non-blocking; chat/files work without it)
+  // Start local media once
   useEffect(() => {
     let cancelled = false;
     void media.start().then((stream) => {
@@ -132,19 +155,14 @@ export function Communication() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // If media stream arrives late, attach to pc
   useEffect(() => {
     if (media.stream) peer.setLocalStream(media.stream);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [media.stream]);
 
   // Cleanup on unmount / tab close.
-  // NOTE: RTCPeerConnection lifetime is owned SOLELY by useWebRTC's setup
-  // effect. This effect must NOT close it — doing so killed the just-created
-  // PC on StrictMode remount / every sessionId re-run (create -> cleanup loop).
   useEffect(() => {
     const handleBeforeUnload = () => {
       socket.emit("leave-session", { sessionId });
@@ -154,7 +172,6 @@ export function Communication() {
       window.removeEventListener("beforeunload", handleBeforeUnload);
       media.stop();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   const handleEnd = useCallback(() => {
@@ -206,6 +223,8 @@ export function Communication() {
       ? "connecting"
       : peer.connectionState;
 
+  const canSwitchCamera = typeof navigator !== "undefined" && navigator.mediaDevices?.getSupportedConstraints?.()?.facingMode === true;
+
   return (
     <CommunicationLayout
       header={
@@ -245,11 +264,38 @@ export function Communication() {
         </header>
       }
       video={
-        <VideoPanel
-          localStream={media.stream}
-          remoteStream={peer.remoteStream}
-          cameraOn={media.cameraOn}
-        />
+        <>
+          <VideoPanel
+            localStream={media.stream}
+            remoteStream={peer.remoteStream}
+            cameraOn={media.cameraOn}
+            localName={localName}
+            onSwapVideos={swapVideos}
+          />
+          <WatchTogetherPanel
+            watchState={watch.watchState}
+            playerReady={watch.playerReady}
+            error={watch.error}
+            isPanelOpen={watch.isPanelOpen}
+            isMinimized={watch.isMinimized}
+            panelPosition={watch.panelPosition}
+            playerContainerRef={watch.playerContainerRef}
+            onLoadVideo={watch.loadVideo}
+            onPlay={watch.playVideo}
+            onPause={watch.pauseVideo}
+            onSeek={watch.seekVideo}
+            onAddToPlaylist={watch.addToPlaylist}
+            onRemoveFromPlaylist={watch.removeFromPlaylist}
+            onPlayPlaylistItem={watch.playPlaylistItem}
+            onMinimize={watch.minimizePanel}
+            onRestore={watch.restorePanel}
+            onClose={watch.closePanel}
+            onTogglePlaylist={() => setShowPlaylist((prev) => !prev)}
+            showPlaylist={showPlaylist}
+            localName={localName}
+            peerName={peerName}
+          />
+        </>
       }
       controls={
         <>
@@ -263,6 +309,9 @@ export function Communication() {
             cameraOn={media.cameraOn}
             onToggleMic={media.toggleMic}
             onToggleCamera={media.toggleCamera}
+            onSwitchCamera={handleSwitchCamera}
+            onWatchTogether={handleWatchTogether}
+            canSwitchCamera={canSwitchCamera && media.cameraOn}
             onShareFile={openFilePicker}
             onEnd={handleEnd}
           />
