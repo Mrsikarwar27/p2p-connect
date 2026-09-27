@@ -13,6 +13,7 @@ export function Landing() {
   const navigate = useNavigate();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [joinId, setJoinId] = useState("");
+  const [name, setName] = useState("");
   const [status, setStatus] = useState<ConnectionState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -26,8 +27,9 @@ export function Landing() {
     };
     const onPeerJoined = (payload: { sessionId: string }) => {
       // Initiator: peer arrived — move to communication view.
+      const trimmedName = name.trim();
       navigate(`/session/${payload.sessionId}`, {
-        state: { isInitiator: true, fresh: true },
+        state: { isInitiator: true, fresh: true, name: trimmedName },
       });
     };
     const onError = (payload: SessionErrorEvent) => {
@@ -42,9 +44,14 @@ export function Landing() {
       socket.off("peer-joined", onPeerJoined);
       socket.off("session-error", onError);
     };
-  }, [socket, navigate]);
+  }, [socket, navigate, name]);
 
   const create = () => {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      setError("Please enter your name.");
+      return;
+    }
     setError(null);
     setCreating(true);
     socket.emit("create-session");
@@ -52,12 +59,17 @@ export function Landing() {
 
   const join = () => {
     const id = joinId.trim().toUpperCase();
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      setError("Please enter your name.");
+      return;
+    }
     if (!id) {
       setError("Please enter a connection ID.");
       return;
     }
     setError(null);
-    navigate(`/session/${id}`, { state: { isInitiator: false } });
+    navigate(`/session/${id}`, { state: { isInitiator: false, name: trimmedName } });
   };
 
   return (
@@ -81,58 +93,69 @@ export function Landing() {
       </div>
 
       <ConnectionCard>
-        {!sessionId ? (
-          <button
-            onClick={create}
-            disabled={creating}
-            className="w-full rounded-xl bg-primary px-4 py-3 font-display text-sm font-bold text-[#13131B] transition hover:brightness-110 disabled:opacity-50"
-          >
-            {creating ? "Creating..." : "Create Connection ID"}
-          </button>
-        ) : (
-          <ConnectionId sessionId={sessionId} />
-        )}
-
-        <div className="my-5 flex items-center gap-3 text-xs text-muted">
-          <div className="h-px flex-1 bg-border" />
-          <span>OR</span>
-          <div className="h-px flex-1 bg-border" />
-        </div>
-
         <label className="text-xs font-medium uppercase tracking-widest text-muted">
-          Enter remote peer connection ID
+          Enter your name
         </label>
-        <div className="mt-2 flex gap-2">
-          <input
-            value={joinId}
-            onChange={(e) => setJoinId(e.target.value.toUpperCase())}
-            placeholder="7F3K-92LM"
-            maxLength={9}
-            className="min-w-0 flex-1 rounded-xl border border-border bg-panel2 px-4 py-3 font-mono text-sm tracking-[0.2em] text-ink placeholder:text-muted/40 focus:border-primary/60 focus:outline-none"
-          />
-          <button
-            onClick={join}
-            className="flex items-center gap-1.5 rounded-xl bg-panel3 px-5 py-3 text-sm font-semibold text-ink transition hover:brightness-125"
-          >
-            Connect <ArrowRight size={15} />
-          </button>
-        </div>
-
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Enter your name"
+          maxLength={30}
+          className="mt-2 w-full rounded-xl border border-border bg-panel2 px-4 py-3 text-sm text-ink placeholder:text-muted/40 focus:border-primary/60 focus:outline-none"
+        />
         {error && (
           <p className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
             {error}
           </p>
         )}
 
-        <div className="mt-5">
-          <ConnectionStatus state={sessionId ? status : "idle"} />
-          {sessionId && (
+        {!sessionId ? (
+          <button
+            onClick={create}
+            disabled={creating}
+            className="mt-4 w-full rounded-xl bg-primary px-4 py-3 font-display text-sm font-bold text-[#13131B] transition hover:brightness-110 disabled:opacity-50"
+          >
+            {creating ? "Creating..." : "Create Connection ID"}
+          </button>
+        ) : (
+          <>
+            <ConnectionId sessionId={sessionId} />
+            <div className="my-5 flex items-center gap-3 text-xs text-muted">
+              <div className="h-px flex-1 bg-border" />
+              <span>OR</span>
+              <div className="h-px flex-1 bg-border" />
+            </div>
+
+            <label className="text-xs font-medium uppercase tracking-widest text-muted">
+              Enter remote peer connection ID
+            </label>
+            <div className="mt-2 flex gap-2">
+              <input
+                value={joinId}
+                onChange={(e) => setJoinId(e.target.value.toUpperCase())}
+                placeholder="7F3K-92LM"
+                maxLength={9}
+                className="min-w-0 flex-1 rounded-xl border border-border bg-panel2 px-4 py-3 font-mono text-sm tracking-[0.2em] text-ink placeholder:text-muted/40 focus:border-primary/60 focus:outline-none"
+              />
+              <button
+                onClick={join}
+                className="flex items-center gap-1.5 rounded-xl bg-panel3 px-5 py-3 text-sm font-semibold text-ink transition hover:brightness-125"
+              >
+                Connect <ArrowRight size={15} />
+              </button>
+            </div>
+          </>
+        )}
+
+        {sessionId && (
+          <div className="mt-5">
+            <ConnectionStatus state={status} />
             <p className="mt-1 text-xs text-muted">
               Share this ID with your peer. Stay on this page — you will continue automatically
               when they join.
             </p>
-          )}
-        </div>
+          </div>
+        )}
       </ConnectionCard>
 
       <p className="mt-6 max-w-md text-center text-xs leading-relaxed text-muted/70">

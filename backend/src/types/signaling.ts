@@ -1,6 +1,7 @@
 export interface Session {
   id: string;
   peers: string[];
+  peerNames: Map<string, string>;
   createdAt: number;
 }
 

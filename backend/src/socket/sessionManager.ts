@@ -29,7 +29,7 @@ export class SessionManager {
     while (this.sessions.has(id)) {
       id = generateSessionId();
     }
-    const session: Session = { id, peers: [], createdAt: Date.now() };
+    const session: Session = { id, peers: [], peerNames: new Map(), createdAt: Date.now() };
     this.sessions.set(id, session);
     return session;
   }
@@ -38,7 +38,7 @@ export class SessionManager {
     return this.sessions.get(normalizeSessionId(sessionId));
   }
 
-  addPeer(sessionId: string, socketId: string): { ok: true; session: Session } | { ok: false; reason: "invalid" | "full" } {
+  addPeer(sessionId: string, socketId: string, name?: string): { ok: true; session: Session } | { ok: false; reason: "invalid" | "full" } {
     const id = normalizeSessionId(sessionId);
     if (this.cleanupTimers.has(id)) {
       clearTimeout(this.cleanupTimers.get(id));
@@ -49,8 +49,21 @@ export class SessionManager {
     if (session.peers.includes(socketId)) return { ok: true, session };
     if (session.peers.length >= MAX_PEERS) return { ok: false, reason: "full" };
     session.peers.push(socketId);
+    if (name) session.peerNames.set(socketId, name);
     this.socketToSession.set(socketId, id);
     return { ok: true, session };
+  }
+
+  setPeerName(sessionId: string, socketId: string, name: string): void {
+    const session = this.sessions.get(normalizeSessionId(sessionId));
+    if (session) {
+      session.peerNames.set(socketId, name);
+    }
+  }
+
+  getPeerName(sessionId: string, socketId: string): string | undefined {
+    const session = this.sessions.get(normalizeSessionId(sessionId));
+    return session?.peerNames.get(socketId);
   }
 
   removeSocket(socketId: string): Session | undefined {

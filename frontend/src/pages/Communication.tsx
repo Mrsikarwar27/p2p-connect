@@ -25,6 +25,8 @@ export function Communication() {
   const socket = useSocket();
   const media = useMediaStream();
 
+  // Get name from router state (passed from Landing page)
+  const locationName = ((location.state as { name?: string } | null)?.name ?? "").trim();
   const locationInitiator = Boolean(
     (location.state as { isInitiator?: boolean } | null)?.isInitiator,
   );
@@ -35,9 +37,18 @@ export function Communication() {
   const initiatorRef = useRef(effectiveInitiator);
   initiatorRef.current = effectiveInitiator;
 
-  const peer = useWebRTC({ socket, sessionId, isInitiator: effectiveInitiator });
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [joined, setJoined] = useState(false);
+  const [localName, setLocalName] = useState(locationName);
+  const [peerName, setPeerName] = useState<string>("");
+
+  const peer = useWebRTC({
+    socket,
+    sessionId,
+    isInitiator: effectiveInitiator,
+    localName,
+    peerName,
+  });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sendOfferRef = useRef(peer.sendOffer);
   sendOfferRef.current = peer.sendOffer;
@@ -53,6 +64,9 @@ export function Communication() {
       if (typeof payload.initiator === "boolean") {
         setServerInitiator(payload.initiator);
       }
+      // Store names from signaling
+      if (payload.name) setLocalName(payload.name);
+      if (payload.peerName) setPeerName(payload.peerName);
       const effective = payload.initiator ?? initiatorRef.current;
       if (payload.peerCount === 2 && effective) {
         setTimeout(() => void sendOfferRef.current(), 400);
@@ -61,6 +75,8 @@ export function Communication() {
     const onPeerJoined = (payload: PeerJoinedEvent) => {
       if (payload.sessionId !== sessionId) return;
       peer.setConnectionState("connecting");
+      // Store peer's name when they join
+      if (payload.name) setPeerName(payload.name);
       if (initiatorRef.current) {
         setTimeout(() => void sendOfferRef.current(), 400);
       }
@@ -80,7 +96,8 @@ export function Communication() {
     socket.on("session-error", onSessionError);
     socket.on("peer-left", onPeerLeft);
 
-    socket.emit("join-session", { sessionId });
+    // Include name in join-session payload
+    socket.emit("join-session", { sessionId, name: localName });
 
     return () => {
       socket.off("session-joined", onJoined);
@@ -89,7 +106,7 @@ export function Communication() {
       socket.off("peer-left", onPeerLeft);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, socket]);
+  }, [sessionId, socket, localName]);
 
   // Offer retry: the one-shot triggers above can be lost (remount gaps,
   // throttle suppression, role learned late). Until the chat channel opens,
@@ -209,7 +226,15 @@ export function Communication() {
                 {sessionId}
               </span>
             </div>
-            <StatusPill status={status} channelOpen={peer.channelOpen} />
+            <div className="flex items-center gap-3">
+              {joined && peerName && (
+                <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-border bg-panel3 px-3 py-1 text-xs font-medium text-muted">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                  {peerName}
+                </span>
+              )}
+              <StatusPill status={status} channelOpen={peer.channelOpen} />
+            </div>
           </div>
           {sessionError && (
             <p className="mx-auto w-full max-w-7xl px-4 pb-2 text-sm text-red-300">{sessionError}</p>

@@ -3,6 +3,7 @@ import { SessionManager, normalizeSessionId } from "./sessionManager.js";
 
 interface JoinPayload {
   sessionId?: string;
+  name?: string;
 }
 
 interface OfferPayload {
@@ -41,6 +42,7 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
     socket.on("join-session", (payload: JoinPayload) => {
       const rawId = payload?.sessionId ?? "";
       const sessionId = normalizeSessionId(rawId);
+      const name = payload?.name?.trim() ?? "";
       if (!sessionId) {
         socket.emit("session-error", {
           sessionId: rawId,
@@ -49,7 +51,7 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
         });
         return;
       }
-      const result = sessions.addPeer(sessionId, socket.id);
+      const result = sessions.addPeer(sessionId, socket.id, name || undefined);
       if (!result.ok) {
         if (result.reason === "full") {
           console.log(`[Signaling] Join rejected (full): ${sessionId} (${socket.id})`);
@@ -74,6 +76,8 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       // This is authoritative — clients must not rely solely on router state,
       // which is lost on refresh / direct navigation.
       const initiator = session.peers[0] === socket.id;
+      const otherPeerId = session.peers.find((id) => id !== socket.id);
+      const otherPeerName = otherPeerId ? sessions.getPeerName(sessionId, otherPeerId) : undefined;
       console.log(
         `[Signaling] Peer joined: ${sessionId} (${socket.id}) count=${session.peers.length} initiator=${initiator}`,
       );
@@ -82,11 +86,14 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
         peerId: socket.id,
         peerCount: session.peers.length,
         initiator,
+        name,
+        peerName: otherPeerName,
       });
       socket.to(sessionId).emit("peer-joined", {
         sessionId,
         peerId: socket.id,
         peerCount: session.peers.length,
+        name,
       });
     });
 

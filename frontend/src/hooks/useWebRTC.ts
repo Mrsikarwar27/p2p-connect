@@ -22,6 +22,8 @@ interface UseWebRTCOptions {
   socket: Socket;
   sessionId: string;
   isInitiator: boolean;
+  localName?: string;
+  peerName?: string;
 }
 
 interface IncomingFile {
@@ -42,7 +44,7 @@ function mapPcState(s: RTCPeerConnectionState): ConnectionState {
   return "connecting";
 }
 
-export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) {
+export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName }: UseWebRTCOptions) {
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [channelOpen, setChannelOpen] = useState(false);
   const [chatState, setChatState] = useState<DataChannelStatus>("connecting");
@@ -75,6 +77,7 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
             text: msg.text,
             timestamp: msg.timestamp,
             sender: "remote",
+            senderName: msg.senderName,
           },
         ]);
       } else if (msg.kind === "file-start") {
@@ -445,6 +448,7 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         text: trimmed.slice(0, 4000),
         timestamp: Date.now(),
+        senderName: localName,
       };
       try {
         manager.sendText(JSON.stringify(msg));
@@ -456,6 +460,7 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
             text: msg.text,
             timestamp: msg.timestamp,
             sender: "local",
+            senderName: localName,
           },
         ]);
         return true;
@@ -464,7 +469,7 @@ export function useWebRTC({ socket, sessionId, isInitiator }: UseWebRTCOptions) 
         return false;
       }
     },
-    [],
+    [localName],
   );
 
   const sendFile = useCallback(

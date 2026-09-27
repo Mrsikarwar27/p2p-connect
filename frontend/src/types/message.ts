@@ -4,6 +4,7 @@ export interface ChatMessage {
   text: string;
   timestamp: number;
   sender: "local" | "remote";
+  senderName?: string;
 }
 
 export function createLocalMessage(text: string): ChatMessage {

@@ -19,7 +19,7 @@ export interface FileTransferState {
 }
 
 export type ControlMessage =
-  | { kind: "chat"; id: string; text: string; timestamp: number }
+  | { kind: "chat"; id: string; text: string; timestamp: number; senderName?: string }
   | {
       kind: "file-start";
       fileId: string;

@@ -7,12 +7,15 @@ export interface SessionJoinedEvent {
   peerId: string;
   peerCount: number;
   initiator: boolean;
+  name: string;
+  peerName?: string;
 }
 
 export interface PeerJoinedEvent {
   sessionId: string;
   peerId: string;
   peerCount: number;
+  name?: string;
 }
 
 export interface PeerLeftEvent {

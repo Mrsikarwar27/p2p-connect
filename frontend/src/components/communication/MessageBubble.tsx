@@ -2,6 +2,7 @@ import type { ChatMessage } from "../../types/message";
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
   const local = message.sender === "local";
+  const displayName = message.senderName ?? (local ? "You" : "Peer");
   return (
     <div className={`mb-2 flex ${local ? "justify-end" : "justify-start"}`}>
       <div
@@ -11,6 +12,9 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
             : "rounded-bl-md border border-border bg-panel3 text-ink"
         }`}
       >
+        {!local && (
+          <p className="mb-1 text-[11px] font-medium text-muted">{displayName}</p>
+        )}
         <p className="break-words">{message.text}</p>
         <p className={`mt-1 text-[10px] ${local ? "text-[#13131B]/60" : "text-muted"}`}>
           {new Date(message.timestamp).toLocaleTimeString([], {
