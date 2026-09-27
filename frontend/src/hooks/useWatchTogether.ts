@@ -9,8 +9,6 @@ interface UseWatchTogetherOptions {
   peerName?: string;
 }
 
-const YOUTUBE_API_READY = "YOUTUBE_API_READY";
-
 declare global {
   interface Window {
     YT: any;
@@ -62,6 +60,9 @@ function loadYouTubeAPI(): Promise<void> {
   });
 }
 
+const SYNC_INTERVAL = 3000; // 3 seconds for drift correction
+const DRIFT_THRESHOLD = 0.5; // 500ms threshold for correction
+
 export function useWatchTogether({ socket, sessionId, localPeerId, peerName }: UseWatchTogetherOptions) {
   const [watchState, setWatchState] = useState<WatchState>({
     videoId: null,
@@ -82,6 +83,8 @@ export function useWatchTogether({ socket, sessionId, localPeerId, peerName }: U
   const syncTimerRef = useRef<number | null>(null);
   const lastSyncRef = useRef(0);
   const playerContainerRef = useRef<HTMLDivElement>(null);
+  const pendingSeekRef = useRef<number | null>(null);
+  const pendingLoadRef = useRef<string | null>(null);
 
   const sendSync = useCallback(
     (action: WatchSyncEvent["action"], data: Partial<WatchSyncEvent> = {}) => {
@@ -97,10 +100,38 @@ export function useWatchTogether({ socket, sessionId, localPeerId, peerName }: U
     [socket, sessionId, localPeerId],
   );
 
+  // Periodic sync for drift correction
+  const startPeriodicSync = useCallback(() => {
+    if (syncTimerRef.current) return;
+    syncTimerRef.current = window.setInterval(() => {
+      if (!playerRef.current || !playerReady || isRemoteUpdateRef.current) return;
+      const currentTime = playerRef.current.getCurrentTime?.() ?? 0;
+      const isPlaying = watchState.isPlaying;
+      if (isPlaying) {
+        sendSync("sync", { currentTime, videoId: watchState.videoId ?? undefined, isPlaying });
+      }
+    }, SYNC_INTERVAL);
+  }, [sendSync, watchState.isPlaying, watchState.videoId, playerReady]);
+
+  const stopPeriodicSync = useCallback(() => {
+    if (syncTimerRef.current) {
+      clearInterval(syncTimerRef.current);
+      syncTimerRef.current = null;
+    }
+  }, []);
+
   const applyRemoteState = useCallback(
     (event: WatchSyncEvent) => {
       if (event.from === localPeerId) return;
-      if (!playerRef.current || !playerReady) return;
+      if (!playerRef.current || !playerReady) {
+        // Queue the event if player not ready
+        if (event.action === "load" && event.videoId) {
+          pendingLoadRef.current = event.videoId;
+        } else if (event.action === "seek" && typeof event.currentTime === "number") {
+          pendingSeekRef.current = event.currentTime;
+        }
+        return;
+      }
 
       isRemoteUpdateRef.current = true;
 
@@ -110,18 +141,20 @@ export function useWatchTogether({ socket, sessionId, localPeerId, peerName }: U
             if (event.videoId) {
               playerRef.current.loadVideoById(event.videoId);
               if (typeof event.currentTime === "number" && event.currentTime > 0) {
-                setTimeout(() => {
-                  if (playerRef.current) {
-                    playerRef.current.seekTo(event.currentTime!, true);
-                  }
-                }, 500);
+                pendingSeekRef.current = event.currentTime;
               }
             }
             break;
           case "play":
+            if (typeof event.currentTime === "number") {
+              playerRef.current.seekTo(event.currentTime, true);
+            }
             playerRef.current.playVideo();
             break;
           case "pause":
+            if (typeof event.currentTime === "number") {
+              playerRef.current.seekTo(event.currentTime, true);
+            }
             playerRef.current.pauseVideo();
             break;
           case "seek":
@@ -130,15 +163,37 @@ export function useWatchTogether({ socket, sessionId, localPeerId, peerName }: U
             }
             break;
           case "state":
-            if (event.videoId !== undefined) {
-              setWatchState((prev) => ({
-                ...prev,
-                videoId: event.videoId ?? null,
-                isPlaying: event.isPlaying ?? false,
-                currentTime: event.currentTime ?? 0,
-                playlist: event.playlist ?? [],
-                playlistIndex: event.playlistIndex ?? 0,
-              }));
+            // Full state sync - load video if different
+            if (event.videoId && event.videoId !== watchState.videoId) {
+              playerRef.current.loadVideoById(event.videoId);
+              pendingSeekRef.current = event.currentTime ?? 0;
+            } else if (typeof event.currentTime === "number") {
+              playerRef.current.seekTo(event.currentTime, true);
+            }
+            if (event.isPlaying) {
+              playerRef.current.playVideo();
+            } else {
+              playerRef.current.pauseVideo();
+            }
+            setWatchState((prev) => ({
+              ...prev,
+              videoId: event.videoId ?? prev.videoId,
+              isPlaying: event.isPlaying ?? prev.isPlaying,
+              currentTime: event.currentTime ?? prev.currentTime,
+              playlist: event.playlist ?? prev.playlist,
+              playlistIndex: event.playlistIndex ?? prev.playlistIndex,
+            }));
+            break;
+          case "sync":
+            // Lightweight periodic sync for drift correction
+            if (typeof event.currentTime === "number" && event.videoId === watchState.videoId) {
+              const localTime = playerRef.current.getCurrentTime?.() ?? 0;
+              const remoteTime = event.currentTime;
+              const diff = Math.abs(localTime - remoteTime);
+              if (diff > DRIFT_THRESHOLD && event.isPlaying === watchState.isPlaying) {
+                // Only correct if both are playing or both paused, and difference is significant
+                playerRef.current.seekTo(remoteTime, true);
+              }
             }
             break;
           case "playlist-add":
@@ -177,7 +232,7 @@ export function useWatchTogether({ socket, sessionId, localPeerId, peerName }: U
         }, 0);
       }
     },
-    [localPeerId, playerReady],
+    [localPeerId, playerReady, watchState.videoId, watchState.isPlaying],
   );
 
   useEffect(() => {
@@ -187,12 +242,40 @@ export function useWatchTogether({ socket, sessionId, localPeerId, peerName }: U
     };
   }, [socket, applyRemoteState]);
 
+  // Process pending operations when player becomes ready
+  useEffect(() => {
+    if (playerReady && playerRef.current) {
+      if (pendingLoadRef.current) {
+        playerRef.current.loadVideoById(pendingLoadRef.current);
+        pendingLoadRef.current = null;
+      }
+      if (pendingSeekRef.current !== null) {
+        setTimeout(() => {
+          if (playerRef.current) {
+            playerRef.current.seekTo(pendingSeekRef.current!, true);
+          }
+          pendingSeekRef.current = null;
+        }, 500);
+      }
+    }
+  }, [playerReady]);
+
   const onPlayerReady = useCallback(
     (event: any) => {
       const ytPlayer = event.target;
       playerRef.current = ytPlayer;
       setPlayer(ytPlayer);
       setPlayerReady(true);
+
+      // Apply any pending operations
+      if (pendingLoadRef.current) {
+        ytPlayer.loadVideoById(pendingLoadRef.current);
+        pendingLoadRef.current = null;
+      }
+      if (pendingSeekRef.current !== null) {
+        setTimeout(() => ytPlayer.seekTo(pendingSeekRef.current!, true), 500);
+        pendingSeekRef.current = null;
+      }
 
       if (watchState.videoId) {
         ytPlayer.loadVideoById(watchState.videoId);
@@ -272,7 +355,14 @@ export function useWatchTogether({ socket, sessionId, localPeerId, peerName }: U
     if (isPanelOpen && !playerReady) {
       initPlayer();
     }
-  }, [isPanelOpen, playerReady, initPlayer]);
+    // Start periodic sync when panel opens
+    if (isPanelOpen) {
+      startPeriodicSync();
+    } else {
+      stopPeriodicSync();
+    }
+    return () => stopPeriodicSync();
+  }, [isPanelOpen, playerReady, initPlayer, startPeriodicSync, stopPeriodicSync]);
 
   const loadVideo = useCallback(
     (url: string) => {
@@ -400,9 +490,7 @@ export function useWatchTogether({ socket, sessionId, localPeerId, peerName }: U
 
   useEffect(() => {
     return () => {
-      if (syncTimerRef.current) {
-        clearInterval(syncTimerRef.current);
-      }
+      stopPeriodicSync();
       if (playerRef.current) {
         try {
           playerRef.current.destroy();
@@ -411,7 +499,7 @@ export function useWatchTogether({ socket, sessionId, localPeerId, peerName }: U
         }
       }
     };
-  }, []);
+  }, [stopPeriodicSync]);
 
   return {
     watchState,

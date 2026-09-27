@@ -20,7 +20,7 @@ export interface PeerJoinedEvent {
 
 export interface WatchSyncEvent {
   sessionId: string;
-  action: "load" | "play" | "pause" | "seek" | "state" | "playlist-add" | "playlist-remove" | "playlist-play";
+  action: "load" | "play" | "pause" | "seek" | "state" | "sync" | "playlist-add" | "playlist-remove" | "playlist-play";
   videoId?: string | null;
   currentTime?: number;
   isPlaying?: boolean;

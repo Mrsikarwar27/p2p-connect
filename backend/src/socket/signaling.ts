@@ -102,6 +102,21 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
         name,
         peerName: otherPeerName,
       });
+      // Send current watch state to the new peer
+      const watchState = sessions.getWatchState(sessionId);
+      if (watchState && watchState.videoId) {
+        socket.emit("watch:sync", {
+          sessionId,
+          action: "state",
+          videoId: watchState.videoId,
+          currentTime: watchState.currentTime,
+          isPlaying: watchState.isPlaying,
+          playlist: watchState.playlist,
+          playlistIndex: watchState.playlistIndex,
+          from: "server",
+          timestamp: Date.now(),
+        });
+      }
       socket.to(sessionId).emit("peer-joined", {
         sessionId,
         peerId: socket.id,

@@ -24,6 +24,8 @@ export function VideoPanel({
   const [localPos, setLocalPos] = useState({ x: 16, y: 16 });
   const [isDragging, setIsDragging] = useState(false);
   const dragOffset = useRef({ x: 0, y: 0 });
+  const animationFrameRef = useRef<number | null>(null);
+  const pendingPosRef = useRef({ x: 16, y: 16 });
 
   useEffect(() => {
     if (remoteRef.current && remoteStream) {
@@ -52,9 +54,33 @@ export function VideoPanel({
         y: e.clientY - localRect.top,
       };
       setIsDragging(true);
+      // Capture pointer for smooth dragging
+      localWrapperRef.current?.setPointerCapture?.(e.pointerId);
     },
     [],
   );
+
+  const updatePosition = useCallback(() => {
+    if (!isDragging || !containerRef.current || !localWrapperRef.current) return;
+
+    const containerRect = containerRef.current.getBoundingClientRect();
+    const videoRect = localWrapperRef.current.getBoundingClientRect();
+    let x = pendingPosRef.current.x;
+    let y = pendingPosRef.current.y;
+
+    // Constrain within container
+    const maxX = containerRect.width - videoRect.width;
+    const maxY = containerRect.height - videoRect.height;
+    x = Math.max(0, Math.min(x, maxX));
+    y = Math.max(0, Math.min(y, maxY));
+
+    // Apply transform directly to avoid React re-renders
+    localWrapperRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+    pendingPosRef.current = { x, y };
+    setLocalPos({ x, y }); // Keep state in sync for persistence
+
+    animationFrameRef.current = requestAnimationFrame(updatePosition);
+  }, [isDragging]);
 
   useEffect(() => {
     if (!isDragging) return;
@@ -62,28 +88,35 @@ export function VideoPanel({
     const move = (e: PointerEvent) => {
       if (!containerRef.current || !localWrapperRef.current) return;
       const containerRect = containerRef.current.getBoundingClientRect();
-      const videoRect = localWrapperRef.current.getBoundingClientRect();
+      const localRect = localWrapperRef.current.getBoundingClientRect();
       let x = e.clientX - containerRect.left - dragOffset.current.x;
       let y = e.clientY - containerRect.top - dragOffset.current.y;
-
-      // Constrain within container
-      const maxX = containerRect.width - videoRect.width;
-      const maxY = containerRect.height - videoRect.height;
-      x = Math.max(0, Math.min(x, maxX));
-      y = Math.max(0, Math.min(y, maxY));
-
-      setLocalPos({ x, y });
+      pendingPosRef.current = { x, y };
     };
 
-    const up = () => setIsDragging(false);
+    const up = (e: PointerEvent) => {
+      setIsDragging(false);
+      localWrapperRef.current?.releasePointerCapture?.(e.pointerId);
+      // Sync final position to state
+      setLocalPos(pendingPosRef.current);
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+
+    // Start animation loop for smooth 60fps updates
+    animationFrameRef.current = requestAnimationFrame(updatePosition);
 
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     return () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
     };
-  }, [isDragging]);
+  }, [isDragging, updatePosition]);
 
   const handleVideoClick = () => {
     onSwapVideos();
@@ -138,7 +171,7 @@ export function VideoPanel({
       {/* Preview video (small, draggable) */}
       <div
         ref={localWrapperRef}
-        style={{ left: localPos.x, top: localPos.y }}
+        style={{ transform: `translate3d(${localPos.x}px, ${localPos.y}px, 0)` }}
         className={`absolute transition-transform duration-150 ${
           isDragging ? "cursor-grabbing" : "cursor-grab"
         }`}

@@ -23,11 +23,30 @@ export function useMediaStream(): MediaState & {
   const [started, setStarted] = useState(false);
   const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
   const streamRef = useRef<MediaStream | null>(null);
+  const deviceIdsRef = useRef<string[]>([]);
+  const currentDeviceIndexRef = useRef(0);
 
-  const getConstraints = (facing: "user" | "environment") => ({
-    video: { facingMode: { ideal: facing } },
+  const getConstraints = (facing: "user" | "environment", deviceId?: string) => ({
+    video: {
+      facingMode: deviceId ? undefined : { ideal: facing },
+      deviceId: deviceId ? { exact: deviceId } : undefined,
+    },
     audio: true,
   });
+
+  const enumerateVideoDevices = useCallback(async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices
+        .filter((d) => d.kind === "videoinput")
+        .map((d) => d.deviceId);
+      deviceIdsRef.current = videoDevices;
+      return videoDevices;
+    } catch {
+      deviceIdsRef.current = [];
+      return [];
+    }
+  }, []);
 
   const start = useCallback(async () => {
     setError(null);
@@ -41,6 +60,7 @@ export function useMediaStream(): MediaState & {
       if (streamRef.current) {
         return streamRef.current;
       }
+      await enumerateVideoDevices();
       const stream = await navigator.mediaDevices.getUserMedia(getConstraints(facingMode));
       streamRef.current = stream;
       setStream(stream);
@@ -100,7 +120,7 @@ export function useMediaStream(): MediaState & {
       setStarted(false);
       return null;
     }
-  }, [facingMode]);
+  }, [facingMode, enumerateVideoDevices]);
 
   const stop = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => {
@@ -140,35 +160,62 @@ export function useMediaStream(): MediaState & {
   const switchCamera = useCallback(async () => {
     const s = streamRef.current;
     if (!s) return;
+
     const nextFacing = facingMode === "user" ? "environment" : "user";
+    let newStream: MediaStream | null = null;
+    let newVideoTrack: MediaStreamTrack | null = null;
+
     try {
-      const newStream = await navigator.mediaDevices.getUserMedia(getConstraints(nextFacing));
-      const newVideoTrack = newStream.getVideoTracks()[0];
+      // First, try to get the new camera stream
+      await enumerateVideoDevices();
+
+      // Try with deviceId if we have multiple cameras
+      let constraints = getConstraints(nextFacing);
+      if (deviceIdsRef.current.length > 1) {
+        // Find the next available camera device
+        currentDeviceIndexRef.current = (currentDeviceIndexRef.current + 1) % deviceIdsRef.current.length;
+        const nextDeviceId = deviceIdsRef.current[currentDeviceIndexRef.current];
+        constraints = getConstraints(nextFacing, nextDeviceId);
+      }
+
+      newStream = await navigator.mediaDevices.getUserMedia(constraints);
+      newVideoTrack = newStream.getVideoTracks()[0];
+
       if (!newVideoTrack) {
         throw new Error("No video track in new stream");
       }
-      // Stop old video tracks
-      s.getVideoTracks().forEach((t) => t.stop());
-      // Add new video track to existing stream (preserves audio)
+
+      // Verify the new track is live
+      if (newVideoTrack.readyState !== "live") {
+        throw new Error("New video track not live");
+      }
+
+      // Replace the track in the existing stream (preserves audio)
+      const oldVideoTracks = s.getVideoTracks();
       s.addTrack(newVideoTrack);
+
+      // Update facing mode and stream reference
       setFacingMode(nextFacing);
-      setStream(new MediaStream(s.getTracks())); // trigger re-render
+      setStream(new MediaStream(s.getTracks()));
+
+      // Now stop old video tracks AFTER successful replacement
+      oldVideoTracks.forEach((t) => t.stop());
+
+      // Clean up the temporary stream (audio tracks)
+      newStream.getAudioTracks().forEach((t) => t.stop());
+
     } catch (err) {
       console.warn("Camera switch failed", err);
       setError("Could not switch camera. This device may not have a rear camera.");
-      // Revert to original camera
-      try {
-        const fallbackStream = await navigator.mediaDevices.getUserMedia(getConstraints(facingMode));
-        const fallbackVideoTrack = fallbackStream.getVideoTracks()[0];
-        if (fallbackVideoTrack) {
-          s.getVideoTracks().forEach((t) => t.stop());
-          s.addTrack(fallbackVideoTrack);
-        }
-      } catch {
-        /* ignore */
+
+      // Cleanup failed stream if any
+      if (newStream) {
+        newStream.getTracks().forEach((t) => t.stop());
       }
+
+      // Keep current camera working - don't break existing stream
     }
-  }, [facingMode]);
+  }, [facingMode, enumerateVideoDevices]);
 
   useEffect(() => {
     return () => {
