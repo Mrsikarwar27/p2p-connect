@@ -51,6 +51,18 @@ export function Communication() {
   const [focusControlsVisible, setFocusControlsVisible] = useState(true);
   const [unreadCount, setUnreadCount] = useState(0);
   const sessionRootRef = useRef<HTMLDivElement>(null);
+  // Screen sharing
+  const canScreenShare =
+    typeof navigator !== "undefined" && !!navigator.mediaDevices?.getDisplayMedia;
+  const [isSharing, setIsSharing] = useState(false);
+  const [remoteSharing, setRemoteSharing] = useState(false);
+  const [shareNotice, setShareNotice] = useState<string | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const savedCameraTrackRef = useRef<MediaStreamTrack | null>(null);
+  const savedMicTrackRef = useRef<MediaStreamTrack | null>(null);
+  const audioReplacedRef = useRef(false);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const sharingActiveRef = useRef(false);
 
   const peer = useWebRTC({
     socket,
@@ -81,6 +93,128 @@ export function Communication() {
       await peer.replaceVideoTrack(newTrack);
     }
   }, [media, peer]);
+
+  // ---- Screen sharing (no renegotiation: sender.replaceTrack only) ----
+
+  const stopScreenShare = useCallback(async () => {
+    if (!sharingActiveRef.current) return; // idempotent
+    sharingActiveRef.current = false;
+    // Restore the saved camera track (kept alive during sharing). If the
+    // camera was off before sharing, the same disabled track comes back.
+    const cam = savedCameraTrackRef.current;
+    await peer.replaceVideoTrack(cam && cam.readyState === "live" ? cam : null);
+    if (audioReplacedRef.current) {
+      const mic = savedMicTrackRef.current;
+      await peer.replaceAudioTrack(mic && mic.readyState === "live" ? mic : null);
+      audioReplacedRef.current = false;
+    }
+    if (audioCtxRef.current) {
+      await audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+    screenStreamRef.current?.getTracks().forEach((t) => {
+      try {
+        t.stop();
+      } catch {
+        /* noop */
+      }
+    });
+    screenStreamRef.current = null;
+    savedCameraTrackRef.current = null;
+    savedMicTrackRef.current = null;
+    setIsSharing(false);
+    socket.emit("screen-share-state", { sessionId, active: false });
+  }, [peer, socket, sessionId]);
+  const stopScreenShareRef = useRef(stopScreenShare);
+  stopScreenShareRef.current = stopScreenShare;
+
+  const startScreenShare = useCallback(async () => {
+    if (sharingActiveRef.current || !canScreenShare) return;
+    setShareNotice(null);
+    let display: MediaStream;
+    try {
+      display = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30, max: 30 },
+        },
+        audio: true,
+      });
+    } catch (err) {
+      const name = (err as DOMException | null)?.name;
+      if (name === "NotAllowedError" || name === "AbortError") {
+        setShareNotice("Screen share cancelled.");
+      } else {
+        setShareNotice("Could not start screen sharing.");
+      }
+      return; // nothing changed — camera/mic keep running
+    }
+    const screenVideo = display.getVideoTracks()[0];
+    if (!screenVideo) {
+      display.getTracks().forEach((t) => t.stop());
+      setShareNotice("Could not start screen sharing.");
+      return;
+    }
+    // Save the current tracks first; the camera track is NEVER stopped.
+    const camTrack = media.stream?.getVideoTracks().find((t) => t.readyState === "live") ?? null;
+    const micTrack = media.stream?.getAudioTracks().find((t) => t.readyState === "live") ?? null;
+    const videoOk = await peer.replaceVideoTrack(screenVideo);
+    if (!videoOk) {
+      display.getTracks().forEach((t) => t.stop());
+      setShareNotice("Start your camera before sharing your screen.");
+      return;
+    }
+    savedCameraTrackRef.current = camTrack;
+    savedMicTrackRef.current = micTrack;
+
+    // Tab audio: mix mic + screen audio; fall back to screen audio alone;
+    // with no screen audio keep the mic untouched (video-only sharing).
+    const screenAudio = display.getAudioTracks()[0] ?? null;
+    if (screenAudio) {
+      let replaced = false;
+      if (micTrack) {
+        try {
+          const ctx = new AudioContext();
+          const dest = ctx.createMediaStreamDestination();
+          ctx.createMediaStreamSource(new MediaStream([micTrack])).connect(dest);
+          ctx.createMediaStreamSource(new MediaStream([screenAudio])).connect(dest);
+          const mixed = dest.stream.getAudioTracks()[0];
+          replaced = await peer.replaceAudioTrack(mixed);
+          if (replaced) {
+            audioCtxRef.current = ctx;
+          } else {
+            await ctx.close().catch(() => {});
+          }
+        } catch {
+          // mixing failed — fall back below
+        }
+      }
+      if (!replaced) {
+        await peer.replaceAudioTrack(screenAudio);
+      }
+      audioReplacedRef.current = true;
+    } else {
+      setShareNotice(
+        "Sharing without tab audio. Share a browser tab and enable 'Share tab audio' to include sound.",
+      );
+    }
+
+    // Native browser "Stop sharing" bar ends the track → same stop path.
+    screenVideo.addEventListener("ended", () => void stopScreenShareRef.current());
+    screenStreamRef.current = display;
+    sharingActiveRef.current = true;
+    setIsSharing(true);
+    socket.emit("screen-share-state", { sessionId, active: true });
+  }, [canScreenShare, media.stream, peer, socket, sessionId]);
+
+  const handleShareScreen = useCallback(() => {
+    if (sharingActiveRef.current) {
+      void stopScreenShare();
+    } else {
+      void startScreenShare();
+    }
+  }, [startScreenShare, stopScreenShare]);
 
   const handleWatchTogether = useCallback(() => {
     watch.togglePanel();
@@ -220,12 +354,17 @@ export function Communication() {
       if (payload.sessionId !== sessionId) return;
       peer.setConnectionState("ended");
     };
+    const onScreenShareState = (payload: { sessionId: string; active?: boolean }) => {
+      if (payload.sessionId !== sessionId) return;
+      setRemoteSharing(Boolean(payload.active));
+    };
 
     socket.on("session-joined", onJoined);
     socket.on("peer-joined", onPeerJoined);
     socket.on("session-role", onRoleUpdate);
     socket.on("session-error", onSessionError);
     socket.on("peer-left", onPeerLeft);
+    socket.on("screen-share-state", onScreenShareState);
 
     socket.emit("join-session", { sessionId, name: localName });
 
@@ -238,6 +377,7 @@ export function Communication() {
       socket.off("session-role", onRoleUpdate);
       socket.off("session-error", onSessionError);
       socket.off("peer-left", onPeerLeft);
+      socket.off("screen-share-state", onScreenShareState);
     };
   }, [sessionId, socket, localName]);
 
@@ -286,6 +426,7 @@ export function Communication() {
   }, [sessionId]);
 
   const handleEnd = useCallback(() => {
+    void stopScreenShareRef.current();
     socket.emit("leave-session", { sessionId });
     media.stop();
     peer.managerRef.current?.cleanup("handleEnd");
@@ -381,13 +522,15 @@ export function Communication() {
       video={
         <>
           <VideoPanel
-            localStream={media.stream}
+            localStream={isSharing ? screenStreamRef.current : media.stream}
             remoteStream={peer.remoteStream}
             cameraOn={media.cameraOn}
             localName={localName}
-            isLocalMain={isLocalMain}
+            isLocalMain={isSharing ? true : isLocalMain}
             onSwapVideos={swapVideos}
             focusMode={focusMode}
+            pipStream={isSharing ? media.stream : undefined}
+            sharedScreen={isSharing || remoteSharing}
           />
           <div className={focusMode ? "hidden" : ""}>
             <WatchTogetherPanel
@@ -435,6 +578,10 @@ export function Communication() {
                   focusMode
                   hidePanelButtons
                   onToggleFocus={() => exitFocus()}
+                  canScreenShare={canScreenShare}
+                  isSharingScreen={isSharing}
+                  onShareScreen={handleShareScreen}
+                  shareScreenDisabled={!peer.channelOpen}
                 />
               </div>
               <div className="flex flex-col items-center gap-2">
@@ -469,6 +616,11 @@ export function Communication() {
               {media.error}
             </p>
           )}
+          {shareNotice && (
+            <p className="mx-auto max-w-xl rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-center text-xs text-amber-200">
+              {shareNotice}
+            </p>
+          )}
           <VideoControls
             micOn={media.micOn}
             cameraOn={media.cameraOn}
@@ -480,6 +632,10 @@ export function Communication() {
             onShareFile={openFilePicker}
             onEnd={handleEnd}
             onToggleFocus={enterFocus}
+            canScreenShare={canScreenShare}
+            isSharingScreen={isSharing}
+            onShareScreen={handleShareScreen}
+            shareScreenDisabled={!peer.channelOpen}
           />
         </>
       }

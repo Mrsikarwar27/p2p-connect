@@ -8,6 +8,11 @@ interface VideoPanelProps {
   isLocalMain: boolean;
   onSwapVideos: () => void;
   focusMode?: boolean;
+  // While screen-sharing, the small PiP shows the local camera instead of
+  // the stream it would normally display in this slot.
+  pipStream?: MediaStream | null;
+  // A shared screen is the main content: letterbox (contain) + label.
+  sharedScreen?: boolean;
 }
 
 export function VideoPanel({
@@ -18,6 +23,8 @@ export function VideoPanel({
   isLocalMain,
   onSwapVideos,
   focusMode = false,
+  pipStream,
+  sharedScreen = false,
 }: VideoPanelProps) {
   const remoteRef = useRef<HTMLVideoElement | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -55,14 +62,24 @@ export function VideoPanel({
   const pendingPosRef = useRef({ x: 16, y: 16 });
 
   const mainVideoStream = isLocalMain ? localStream : remoteStream;
+  const previewVideoStream = pipStream !== undefined ? pipStream : isLocalMain ? remoteStream : localStream;
+  // Muted rule stays: local content is always muted, remote stays unmuted.
+  const previewIsLocalContent = pipStream !== undefined || !isLocalMain;
   const mainVideoEnabled = isLocalMain
     ? (localStream && localStream.getVideoTracks().some((t) => t.readyState === "live") && cameraOn)
     : (remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live"));
-  const previewVideoStream = isLocalMain ? remoteStream : localStream;
-  const previewVideoEnabled = isLocalMain
-    ? (remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live"))
-    : (localStream && localStream.getVideoTracks().some((t) => t.readyState === "live") && cameraOn);
-  const previewCameraOn = isLocalMain ? (remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live")) : cameraOn;
+  const previewVideoEnabled =
+    pipStream !== undefined
+      ? (pipStream && pipStream.getVideoTracks().some((t) => t.readyState === "live") && cameraOn)
+      : isLocalMain
+        ? (remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live"))
+        : (localStream && localStream.getVideoTracks().some((t) => t.readyState === "live") && cameraOn);
+  const previewCameraOn =
+    pipStream !== undefined
+      ? cameraOn
+      : isLocalMain
+        ? (remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live"))
+        : cameraOn;
 
   const hasRemoteVideo = remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live");
   const hasLocalVideo = localStream && localStream.getVideoTracks().some((t) => t.readyState === "live");
@@ -164,7 +181,7 @@ export function VideoPanel({
             autoPlay
             playsInline
             muted={isLocalMain}
-            className={`absolute inset-0 h-full w-full ${focusMode ? "object-contain" : "object-cover"}`}
+            className={`absolute inset-0 h-full w-full ${focusMode || sharedScreen ? "object-contain" : "object-cover"}`}
             onClick={handleVideoClick}
           />
         ) : (
@@ -211,7 +228,7 @@ export function VideoPanel({
               ref={previewVideoRef}
               autoPlay
               playsInline
-              muted={!isLocalMain}
+              muted={previewIsLocalContent}
               className={`h-full w-full object-cover ${previewCameraOn ? "" : "hidden"}`}
             />
           ) : (
@@ -233,6 +250,12 @@ export function VideoPanel({
       <p className="absolute left-3 top-3 rounded-md bg-black/60 px-2 py-1 text-[11px] text-white/90">
         {isLocalMain ? "Your Video (main)" : "Remote Video (main)"}
       </p>
+      {sharedScreen && (
+        <span className="absolute right-3 top-3 flex items-center gap-1.5 rounded-full bg-black/60 px-3 py-1 text-[11px] font-medium text-white/90">
+          <span className="h-2 w-2 rounded-full bg-red-400" />
+          Screen shared
+        </span>
+      )}
     </div>
   );
 }

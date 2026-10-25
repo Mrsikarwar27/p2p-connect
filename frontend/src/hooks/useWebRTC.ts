@@ -505,17 +505,49 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     [sessionId, socket],
   );
 
+  const findSenderFor = (kind: "video" | "audio") => {
+    const pc = managerRef.current?.pc;
+    if (!pc) return undefined;
+    return (
+      pc.getSenders().find((s) => s.track?.kind === kind) ??
+      pc
+        .getTransceivers()
+        .find(
+          (tr) => tr.receiver.track?.kind === kind && tr.direction !== "recvonly",
+        )?.sender
+    );
+  };
+
   const replaceVideoTrack = useCallback(
-    async (newTrack: MediaStreamTrack) => {
+    async (newTrack: MediaStreamTrack | null) => {
       const pc = managerRef.current?.pc;
       if (!pc) return false;
-      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+      const sender = findSenderFor("video");
       if (!sender) return false;
       try {
         await sender.replaceTrack(newTrack);
         return true;
       } catch (err) {
         console.error("replaceTrack failed", err);
+        return false;
+      }
+    },
+    [],
+  );
+
+  // Swap the audio sender's track (screen-share mic+tab-audio mixing) without
+  // touching the negotiation.
+  const replaceAudioTrack = useCallback(
+    async (newTrack: MediaStreamTrack | null) => {
+      const pc = managerRef.current?.pc;
+      if (!pc) return false;
+      const sender = findSenderFor("audio");
+      if (!sender) return false;
+      try {
+        await sender.replaceTrack(newTrack);
+        return true;
+      } catch (err) {
+        console.error("replaceAudioTrack failed", err);
         return false;
       }
     },
@@ -646,6 +678,7 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     sendOffer,
     setLocalStream,
     replaceVideoTrack,
+    replaceAudioTrack,
     managerRef,
   };
 }

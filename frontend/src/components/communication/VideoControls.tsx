@@ -1,4 +1,4 @@
-import { Mic, MicOff, PhoneOff, Video, VideoOff, Paperclip, SwitchCamera, Monitor, Maximize, Minimize } from "lucide-react";
+import { Mic, MicOff, PhoneOff, Video, VideoOff, Paperclip, SwitchCamera, Monitor, MonitorUp, Maximize, Minimize } from "lucide-react";
 
 export function VideoControls({
   micOn,
@@ -13,6 +13,10 @@ export function VideoControls({
   focusMode = false,
   onToggleFocus,
   hidePanelButtons = false,
+  canScreenShare = false,
+  isSharingScreen = false,
+  onShareScreen,
+  shareScreenDisabled = false,
 }: {
   micOn: boolean;
   cameraOn: boolean;
@@ -26,11 +30,17 @@ export function VideoControls({
   focusMode?: boolean;
   onToggleFocus?: () => void;
   hidePanelButtons?: boolean;
+  canScreenShare?: boolean;
+  isSharingScreen?: boolean;
+  onShareScreen?: () => void;
+  shareScreenDisabled?: boolean;
 }) {
   const btn =
     "flex h-11 w-11 items-center justify-center rounded-full border border-border bg-panel3 text-ink transition hover:brightness-125";
   const btnDisabled =
     "flex h-11 w-11 items-center justify-center rounded-full border border-border bg-panel3 text-muted/40 cursor-not-allowed";
+  const btnActiveShare =
+    "flex h-11 w-11 items-center justify-center rounded-full border border-red-500/50 bg-red-500/15 text-red-400 transition hover:brightness-125";
   return (
     <div className="flex items-center justify-center gap-3 py-3">
       <button onClick={onToggleMic} title={micOn ? "Mute" : "Unmute"} className={btn}>
@@ -47,6 +57,18 @@ export function VideoControls({
           className={cameraOn ? btn : btnDisabled}
         >
           <SwitchCamera size={18} />
+        </button>
+      )}
+      {canScreenShare && onShareScreen && (
+        <button
+          onClick={onShareScreen}
+          title="Share screen"
+          disabled={shareScreenDisabled && !isSharingScreen}
+          className={
+            isSharingScreen ? btnActiveShare : shareScreenDisabled ? btnDisabled : btn
+          }
+        >
+          <MonitorUp size={18} />
         </button>
       )}
       {!hidePanelButtons && (

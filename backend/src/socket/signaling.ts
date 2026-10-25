@@ -174,6 +174,20 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       });
     });
 
+    // Screen share state: relay to the other session member only
+    socket.on("screen-share-state", (payload: { sessionId?: string; active?: boolean }) => {
+      const rawId = payload?.sessionId ?? "";
+      const sessionId = rawId ? normalizeSessionId(rawId) : undefined;
+      if (!sessionId) return;
+      const session = sessions.get(sessionId);
+      if (!session || !session.peers.includes(socket.id)) return; // member check
+      socket.to(sessionId).emit("screen-share-state", {
+        sessionId,
+        active: Boolean(payload.active),
+        from: socket.id,
+      });
+    });
+
     socket.on("leave-session", (payload: { sessionId?: string }) => {
       const rawId = payload?.sessionId ?? "";
       const sessionId = rawId ? normalizeSessionId(rawId) : undefined;
