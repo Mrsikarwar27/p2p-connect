@@ -643,7 +643,7 @@ export function Communication() {
         <>
           <ChatPanel messages={peer.messages} channelOpen={peer.channelOpen} />
           {peer.transfers.length > 0 && (
-            <div className="max-h-56 space-y-2 overflow-y-auto border-t border-border p-3">
+            <div className="max-h-56 shrink-0 space-y-2 overflow-y-auto border-t border-border p-3">
               {peer.transfers.map((t) => (
                 <FileTransferCard key={t.fileId} transfer={t} onCancel={peer.cancelTransfer} />
               ))}
