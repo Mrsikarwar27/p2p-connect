@@ -17,37 +17,40 @@ export function VideoPanel({
   isLocalMain,
   onSwapVideos,
 }: VideoPanelProps) {
-  const remoteRef = useRef<HTMLVideoElement>(null);
-  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteRef = useRef<HTMLVideoElement | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localWrapperRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Ref callbacks: the <video> elements unmount when the camera turns off and
+  // remount when it turns back on. A plain effect keyed on the stream would
+  // NOT re-run for the remounted element (same stream object), leaving it
+  // without srcObject — so assign here, on every attach (and whenever the
+  // callback identity changes because stream/swap changed).
+  const mainVideoRef = useCallback(
+    (el: HTMLVideoElement | null) => {
+      remoteRef.current = el;
+      if (el) {
+        el.srcObject = (isLocalMain ? localStream : remoteStream) ?? null;
+      }
+    },
+    [isLocalMain, localStream, remoteStream],
+  );
+
+  const previewVideoRef = useCallback(
+    (el: HTMLVideoElement | null) => {
+      localVideoRef.current = el;
+      if (el) {
+        el.srcObject = (isLocalMain ? remoteStream : localStream) ?? null;
+      }
+    },
+    [isLocalMain, localStream, remoteStream],
+  );
   const [localPos, setLocalPos] = useState({ x: 16, y: 16 });
   const [isDragging, setIsDragging] = useState(false);
   const dragOffset = useRef({ x: 0, y: 0 });
   const animationFrameRef = useRef<number | null>(null);
   const pendingPosRef = useRef({ x: 16, y: 16 });
-
-  // Assign the correct stream to the main video element based on swap state
-  useEffect(() => {
-    const mainStream = isLocalMain ? localStream : remoteStream;
-    if (remoteRef.current) {
-      remoteRef.current.srcObject = mainStream ?? null;
-      if (!mainStream && remoteRef.current.srcObject) {
-        remoteRef.current.srcObject = null;
-      }
-    }
-  }, [isLocalMain, localStream, remoteStream]);
-
-  // Assign the correct stream to the preview video element based on swap state
-  useEffect(() => {
-    const previewStream = isLocalMain ? remoteStream : localStream;
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = previewStream ?? null;
-      if (!previewStream && localVideoRef.current.srcObject) {
-        localVideoRef.current.srcObject = null;
-      }
-    }
-  }, [isLocalMain, localStream, remoteStream]);
 
   const mainVideoStream = isLocalMain ? localStream : remoteStream;
   const mainVideoEnabled = isLocalMain
@@ -148,7 +151,7 @@ export function VideoPanel({
       <div className="absolute inset-0">
         {mainVideoEnabled && mainVideoStream ? (
           <video
-            ref={remoteRef}
+            ref={mainVideoRef}
             autoPlay
             playsInline
             muted={isLocalMain}
@@ -193,7 +196,7 @@ export function VideoPanel({
         <div className="overflow-hidden rounded-xl border-2 border-white/20 bg-black shadow-xl" style={{ width: 120, height: 160 }}>
           {previewVideoEnabled && previewVideoStream ? (
             <video
-              ref={localVideoRef}
+              ref={previewVideoRef}
               autoPlay
               playsInline
               muted={!isLocalMain}

@@ -463,13 +463,30 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
       );
       let added = false;
       for (const track of stream.getTracks()) {
-        if (!existing.has(track.id)) {
-          try {
-            pc.addTrack(track, stream);
-            added = true;
-          } catch (err) {
-            console.warn("addTrack failed", err);
+        if (existing.has(track.id)) continue;
+        try {
+          if (track.kind === "video") {
+            // Prefer swapping into the existing video sender: no new
+            // m-line, so no renegotiation is needed for the new track.
+            const videoSender =
+              pc.getSenders().find((s) => s.track?.kind === "video") ??
+              pc
+                .getTransceivers()
+                .find(
+                  (tr) =>
+                    tr.receiver.track?.kind === "video" && tr.direction !== "recvonly",
+                )?.sender;
+            if (videoSender) {
+              void videoSender.replaceTrack(track).catch((err) => {
+                console.warn("replaceTrack failed", err);
+              });
+              continue;
+            }
           }
+          pc.addTrack(track, stream);
+          added = true;
+        } catch (err) {
+          console.warn("addTrack failed", err);
         }
       }
       if (added && managerRef.current?.pc?.localDescription && managerRef.current?.pc?.remoteDescription) {
