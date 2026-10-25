@@ -1,4 +1,4 @@
-import { Mic, MicOff, PhoneOff, Video, VideoOff, Paperclip, RotateCcw, Monitor } from "lucide-react";
+import { Mic, MicOff, PhoneOff, Video, VideoOff, Paperclip, SwitchCamera, Monitor } from "lucide-react";
 
 export function VideoControls({
   micOn,
@@ -40,7 +40,7 @@ export function VideoControls({
           disabled={!cameraOn}
           className={cameraOn ? btn : btnDisabled}
         >
-          <RotateCcw size={18} />
+          <SwitchCamera size={18} />
         </button>
       )}
       <button onClick={onWatchTogether} title="Watch Together" className={btn}>
