@@ -13,7 +13,7 @@ export function useMediaStream(): MediaState & {
   start: () => Promise<MediaStream | null>;
   stop: () => void;
   toggleMic: () => void;
-  toggleCamera: () => void;
+  toggleCamera: () => void | Promise<void>;
   switchCamera: () => Promise<MediaStreamTrack | undefined>;
 } {
   const [stream, setStream] = useState<MediaStream | null>(null);
@@ -25,6 +25,7 @@ export function useMediaStream(): MediaState & {
   const streamRef = useRef<MediaStream | null>(null);
   const deviceIdsRef = useRef<string[]>([]);
   const currentDeviceIndexRef = useRef(0);
+  const acquiringRef = useRef(false);
 
   const getConstraints = (facing: "user" | "environment", deviceId?: string) => ({
     video: {
@@ -186,16 +187,57 @@ export function useMediaStream(): MediaState & {
     setMicOn(next);
   }, [micOn]);
 
-  const toggleCamera = useCallback(() => {
+  const toggleCamera = useCallback(async (): Promise<void> => {
     const s = streamRef.current;
-    if (!s) return;
-    const video = s.getVideoTracks();
-    const next = !cameraOn;
-    video.forEach((t) => {
-      t.enabled = next;
-    });
-    setCameraOn(next);
-  }, [cameraOn]);
+    const videoTracks = s?.getVideoTracks() ?? [];
+    if (videoTracks.length > 0) {
+      const next = !cameraOn;
+      videoTracks.forEach((t) => {
+        t.enabled = next;
+      });
+      setCameraOn(next);
+      return;
+    }
+    // No video track exists (permission was denied at start, audio-only
+    // fallback, or no camera found) — if we show "on", just sync state down.
+    if (cameraOn) {
+      setCameraOn(false);
+      return;
+    }
+    // Turning on with no track: acquire the camera on demand.
+    if (acquiringRef.current) return;
+    acquiringRef.current = true;
+    try {
+      const videoOnly = getConstraints(facingMode).video;
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        video: videoOnly,
+        audio: false,
+      });
+      const track = newStream.getVideoTracks()[0];
+      if (!track) throw new Error("No video track returned");
+      if (s) {
+        s.addTrack(track);
+        setStream(new MediaStream(s.getTracks()));
+      } else {
+        streamRef.current = newStream;
+        setStream(newStream);
+        setStarted(true);
+      }
+      setCameraOn(true);
+      setError(null);
+    } catch (err) {
+      const name = (err as DOMException | null)?.name;
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        setError(
+          "Camera permission is blocked. Allow camera for this site in your browser's address-bar settings, then press the camera button again.",
+        );
+      } else {
+        setError("Could not turn on the camera. It may be in use by another app or unavailable.");
+      }
+    } finally {
+      acquiringRef.current = false;
+    }
+  }, [cameraOn, facingMode]);
 
   const switchCamera = useCallback(async () => {
     const s = streamRef.current;

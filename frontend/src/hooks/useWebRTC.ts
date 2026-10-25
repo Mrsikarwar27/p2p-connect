@@ -435,19 +435,6 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     socket.on("ice-candidate", onIce);
     socket.on("peer-left", onPeerLeft);
 
-    // TEMP DEBUG
-    (window as unknown as Record<string, unknown>).__p2pDebug = () => {
-      const m = managerRef.current;
-      return {
-        hasManager: !!m,
-        chat: m?.chatChannel?.readyState ?? null,
-        chatLabel: m?.chatChannel?.label ?? null,
-        file: m?.fileChannel?.readyState ?? null,
-        pc: m?.pc?.connectionState ?? null,
-        sig: m?.pc?.signalingState ?? null,
-      };
-    };
-
     // Initiator creates offer immediately if peer already present is handled by caller.
     // Caller should invoke sendOffer() when peer-joined arrives (or right away for joiner retry).
     return () => {
