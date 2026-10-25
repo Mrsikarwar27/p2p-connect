@@ -36,28 +36,22 @@ interface WatchPayload {
 
 export function setupSignaling(io: Server, sessions: SessionManager): void {
   io.on("connection", (socket: Socket) => {
-    socket.on("create-session", (payload: CreatePayload) => {
+    socket.on("create-session", (payload: CreatePayload & { clientId?: string }) => {
       const name = payload?.name?.trim() ?? "";
+      const clientId = payload?.clientId ?? socket.id;
       const session = sessions.create();
-      console.log(`[Signaling] Session created: ${session.id} (by ${socket.id}) name="${name}"`);
-      const result = sessions.addPeer(session.id, socket.id, name || undefined);
-      if (!result.ok) {
-        socket.emit("session-error", {
-          sessionId: session.id,
-          reason: result.reason,
-          message: "Could not create session.",
-        });
-        return;
-      }
+      sessions.assignSlot(session, socket.id, clientId, name || undefined);
+      sessions.cancelDeleteTimer(session);
       socket.join(session.id);
-      sessions.claimInitiator(session.id, socket.id);
+      console.log(`[Signaling] Session created: ${session.id} (by ${socket.id} client=${clientId}) name="${name}"`);
       socket.emit("session-created", { sessionId: session.id });
     });
 
-    socket.on("join-session", (payload: JoinPayload) => {
+    socket.on("join-session", (payload: JoinPayload & { clientId?: string }) => {
       const rawId = payload?.sessionId ?? "";
       const sessionId = normalizeSessionId(rawId);
       const name = payload?.name?.trim() ?? "";
+      const clientId = payload?.clientId ?? socket.id;
       if (!sessionId) {
         socket.emit("session-error", {
           sessionId: rawId,
@@ -66,51 +60,51 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
         });
         return;
       }
-      // Membership must be checked BEFORE addPeer() mutates the session,
-      // otherwise alreadyPeer is always true and peer-joined never fires.
-      const sessionBefore = sessions.get(sessionId);
-      const alreadyPeer = sessionBefore ? sessionBefore.peers.includes(socket.id) : false;
-      const result = sessions.addPeer(sessionId, socket.id, name || undefined);
-      if (!result.ok) {
-        if (result.reason === "full") {
-          console.log(`[Signaling] Join rejected (full): ${sessionId} (${socket.id})`);
-          socket.emit("session-error", {
-            sessionId,
-            reason: "full",
-            message: "This session is already full.",
-          });
-        } else {
-          console.log(`[Signaling] Join rejected (invalid): ${sessionId} (${socket.id})`);
-          socket.emit("session-error", {
-            sessionId,
-            reason: "invalid",
-            message: "Session not found. Check the ID and try again.",
-          });
-        }
+      const session = sessions.get(sessionId);
+      if (!session) {
+        console.log(`[Signaling] Join rejected (not found): ${sessionId} (${socket.id})`);
+        socket.emit("session-error", {
+          sessionId,
+          reason: "invalid",
+          message: "Session not found. Check the ID and try again.",
+        });
         return;
       }
+      // Signaling is routed by ROOM, never by stored socketId.
       socket.join(sessionId);
-      sessions.claimInitiator(sessionId, socket.id);
-      const session = result.session;
-      // Authoritative role from the session's initiatorId — this is computed
-      // from live peers only, so join-order races after simultaneous reloads
-      // can't leave both peers as answerers. Clients must not rely solely on
-      // router state, which is lost on refresh / direct navigation.
-      const initiator = session.initiatorId === socket.id;
-      const otherPeerId = session.peers.find((id) => id !== socket.id);
-      const otherPeerName = otherPeerId ? sessions.getPeerName(sessionId, otherPeerId) : undefined;
+      const result = sessions.assignSlot(session, socket.id, clientId, name || undefined);
+      if (result === "full") {
+        socket.leave(sessionId);
+        console.log(`[Signaling] Join rejected (full): ${sessionId} (${socket.id})`);
+        socket.emit("session-error", {
+          sessionId,
+          reason: "full",
+          message: "This session is already full.",
+        });
+        return;
+      }
+      sessions.cancelDeleteTimer(session);
+      const mySlot = sessions.slotBySocket(session, socket.id);
+      const partner = sessions.partnerOf(session, socket.id);
+      const partnerState = !partner ? "none" : partner.state === "away" ? "away" : "connected";
+      // Role is derived ONCE from the stable seat: seat 0 is the initiator,
+      // always, for first joins AND rejoins. It never flips.
+      const initiator = session.slots[0] === mySlot;
+      const peerCount = session.slots.filter(Boolean).length;
       console.log(
-        `[Signaling] Peer joined: ${sessionId} (${socket.id}) count=${session.peers.length} initiator=${initiator}`,
+        `[Signaling] ${result === "rejoin" ? "Rejoined" : result === "same" ? "Duplicate-join" : "Joined"}: ${sessionId} (${socket.id} client=${clientId}) epoch=${mySlot?.connectionEpoch} partnerState=${partnerState} initiator=${initiator}`,
       );
       socket.emit("session-joined", {
         sessionId,
         peerId: socket.id,
-        peerCount: session.peers.length,
+        peerCount,
         initiator,
         name,
-        peerName: otherPeerName,
+        peerName: partner?.name,
+        partnerState,
+        epoch: mySlot?.connectionEpoch ?? 1,
       });
-      // Send current watch state to the new peer
+      // Send current watch state to the joining peer
       const watchState = sessions.getWatchState(sessionId);
       if (watchState && watchState.videoId) {
         socket.emit("watch:sync", {
@@ -125,11 +119,23 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
           timestamp: Date.now(),
         });
       }
-      if (!alreadyPeer) {
+      if (!partner || !partner.socketId) return;
+      // "same" = this socket re-joined its own live seat (StrictMode double
+      // mount, manual rejoin button) — idempotent, never notify the partner.
+      if (result === "same") return;
+      const myEpoch = sessions.slotBySocket(session, socket.id)?.connectionEpoch ?? 1;
+      if (result === "rejoin") {
+        socket.to(sessionId).emit("peer-rejoined", {
+          sessionId,
+          peerId: socket.id,
+          name,
+          epoch: myEpoch,
+        });
+      } else {
         socket.to(sessionId).emit("peer-joined", {
           sessionId,
           peerId: socket.id,
-          peerCount: session.peers.length,
+          peerCount,
           name,
         });
       }
@@ -139,8 +145,7 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       if (!payload?.sessionId || !payload.offer) return;
       const sessionId = normalizeSessionId(payload.sessionId);
       const session = sessions.get(sessionId);
-      if (!session || !session.peers.includes(socket.id)) return; // member check
-      console.log(`[Signaling] Routing offer: ${sessionId} (from ${socket.id})`);
+      if (!session || !sessions.isMember(session, socket.id)) return; // member check
       socket.to(sessionId).emit("webrtc-offer", {
         sessionId,
         offer: payload.offer,
@@ -152,8 +157,7 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       if (!payload?.sessionId || !payload.answer) return;
       const sessionId = normalizeSessionId(payload.sessionId);
       const session = sessions.get(sessionId);
-      if (!session || !session.peers.includes(socket.id)) return; // member check
-      console.log(`[Signaling] Routing answer: ${sessionId} (from ${socket.id})`);
+      if (!session || !sessions.isMember(session, socket.id)) return; // member check
       socket.to(sessionId).emit("webrtc-answer", {
         sessionId,
         answer: payload.answer,
@@ -165,8 +169,7 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       if (!payload?.sessionId || !payload.candidate) return;
       const sessionId = normalizeSessionId(payload.sessionId);
       const session = sessions.get(sessionId);
-      if (!session || !session.peers.includes(socket.id)) return; // member check
-      console.log(`[Signaling] Routing ICE candidate: ${sessionId} (from ${socket.id})`);
+      if (!session || !sessions.isMember(session, socket.id)) return; // member check
       socket.to(sessionId).emit("ice-candidate", {
         sessionId,
         candidate: payload.candidate,
@@ -180,7 +183,7 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       const sessionId = rawId ? normalizeSessionId(rawId) : undefined;
       if (!sessionId) return;
       const session = sessions.get(sessionId);
-      if (!session || !session.peers.includes(socket.id)) return; // member check
+      if (!session || !sessions.isMember(session, socket.id)) return; // member check
       socket.to(sessionId).emit("screen-share-state", {
         sessionId,
         active: Boolean(payload.active),
@@ -191,22 +194,18 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
     socket.on("leave-session", (payload: { sessionId?: string }) => {
       const rawId = payload?.sessionId ?? "";
       const sessionId = rawId ? normalizeSessionId(rawId) : undefined;
-      const session = sessions.sessionOfSocket(socket.id);
-      const targetId = sessionId ?? session?.id;
-      sessions.removeSocket(socket.id);
-      if (targetId) {
-        console.log(`[Signaling] Peer left: ${targetId} (${socket.id})`);
-        socket.leave(targetId);
-        socket.to(targetId).emit("peer-left", {
-          sessionId: targetId,
-          peerId: socket.id,
-        });
-        const promoted = sessions.ensureInitiator(targetId);
-        if (promoted) {
-          console.log(`[Signaling] Initiator promoted: ${targetId} -> ${promoted}`);
-          io.to(promoted).emit("session-role", { sessionId: targetId, initiator: true });
-        }
-      }
+      const session = sessionId ? sessions.get(sessionId) : sessions.sessionOfSocket(socket.id);
+      if (!session) return;
+      const removed = sessions.removeSlotBySocket(session, socket.id);
+      if (!removed) return;
+      console.log(`[Signaling] Peer left: ${session.id} (${socket.id})`);
+      socket.leave(session.id);
+      socket.to(session.id).emit("peer-left", {
+        sessionId: session.id,
+        peerId: socket.id,
+      });
+      // Free seat can be taken again; delete only when NO seats remain.
+      sessions.scheduleDeleteIfIdle(session);
     });
 
     // Watch Together events
@@ -219,7 +218,7 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       if (!session) return;
 
       // Validate the peer is in this session
-      if (!session.peers.includes(socket.id)) return;
+      if (!sessions.isMember(session, socket.id)) return;
 
       // Persist watch state before forwarding so late joiners get the real current state
       if (payload.action === "load" && payload.videoId) {
@@ -254,19 +253,18 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
 
     socket.on("disconnect", () => {
       const session = sessions.sessionOfSocket(socket.id);
-      sessions.removeSocket(socket.id);
-      if (session) {
-        console.log(`[Signaling] Peer disconnected: ${session.id} (${socket.id})`);
-        io.to(session.id).emit("peer-left", {
-          sessionId: session.id,
-          peerId: socket.id,
-        });
-        const promoted = sessions.ensureInitiator(session.id);
-        if (promoted) {
-          console.log(`[Signaling] Initiator promoted: ${session.id} -> ${promoted}`);
-          io.to(promoted).emit("session-role", { sessionId: session.id, initiator: true });
-        }
-      }
+      if (!session) return;
+      const slot = sessions.markAway(session, socket.id);
+      if (!slot) return;
+      console.log(`[Signaling] Peer away: ${session.id} (${socket.id})`);
+      // Unexpected drop: the seat is HELD (state=away), the session survives.
+      socket.to(session.id).emit("peer-away", {
+        sessionId: session.id,
+        peerId: socket.id,
+        name: slot.name,
+      });
+      // Both seats away -> grace timer; any join cancels it.
+      sessions.scheduleDeleteIfIdle(session);
     });
   });
 }

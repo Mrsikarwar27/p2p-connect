@@ -19,6 +19,10 @@ export function createSocket(): Socket {
   socketInstance = io(url, {
     transports: ["websocket", "polling"],
     autoConnect: true,
+    reconnection: true,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 5000,
+    reconnectionAttempts: Infinity,
   });
   return socketInstance;
 }

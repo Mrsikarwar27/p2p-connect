@@ -13,15 +13,30 @@ export interface WatchState {
   updatedAt: number;
 }
 
+export type MemberState = "connected" | "away";
+
+// One reserved seat in a session. The slot survives socket churn: on
+// disconnect the socketId is cleared and the slot goes "away" — the
+// clientId (or the code itself) lets the same/another socket reclaim it.
+export interface SessionSlot {
+  clientId: string;
+  socketId: string | null;
+  name?: string;
+  state: MemberState;
+  awaySince?: number;
+  // Incremented ONLY when the slot's socketId actually changes (refresh,
+  // reconnect, takeover). Clients rebuild their peer connection exactly once
+  // per new epoch and ignore duplicate/older epochs.
+  connectionEpoch: number;
+}
+
 export interface Session {
   id: string;
-  peers: string[];
-  peerNames: Map<string, string>;
+  // Exactly two seats; null = empty.
+  slots: (SessionSlot | null)[];
+  deleteTimer?: NodeJS.Timeout;
   watchState: WatchState;
   createdAt: number;
-  // Socket id of the authoritative initiator (offer sender). Survives peer
-  // churn so simultaneous reloads can't leave both peers as answerers.
-  initiatorId: string | null;
 }
 
 export type SessionErrorReason = "invalid" | "full";

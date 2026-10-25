@@ -12,12 +12,14 @@ import { WatchTogetherPanel } from "../components/communication/WatchTogetherPan
 import { ChatPanel } from "../components/communication/ChatPanel";
 import { MessageInput } from "../components/communication/MessageInput";
 import { FileTransferCard } from "../components/communication/FileTransferCard";
+import { getClientId, readRejoin, saveRejoin, clearRejoin } from "../utils/rejoin";
 import { supportsWebRTC, type ConnectionState } from "../types/webrtc";
 import type {
+  PeerAwayEvent,
   PeerJoinedEvent,
+  PeerRejoinedEvent,
   SessionErrorEvent,
   SessionJoinedEvent,
-  SessionRoleEvent,
 } from "../types/signaling";
 
 export function Communication() {
@@ -82,6 +84,8 @@ export function Communication() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sendOfferRef = useRef(peer.sendOffer);
   sendOfferRef.current = peer.sendOffer;
+  const joinedRef = useRef(false);
+  joinedRef.current = joined;
 
   const swapVideos = useCallback(() => {
     setIsLocalMain((prev) => !prev);
@@ -313,7 +317,43 @@ export function Communication() {
     prevRemoteCountRef.current = remoteMessageCount;
   }, [remoteMessageCount, focusMode]);
 
-  // Join signaling session + wire initiator offer triggers
+  // Stable handle to the peer API for socket handlers — the hook returns a
+  // fresh object every render, so `peer` must NEVER be in effect deps (it
+  // would re-run the join effect on every render = infinite re-join loop).
+  const peerRef = useRef(peer);
+  peerRef.current = peer;
+
+  // Join-once guard (design core rule 1): a join is emitted only when the
+  // key `${socket.id}:${sessionId}:${clientId}` changes — new socket
+  // connection or new session. Re-renders and hook-object identity churn
+  // can never re-emit it. force=true (manual "Rejoin with code") bypasses.
+  const lastJoinKeyRef = useRef("");
+  // Rejoin epochs (design core rule 3): teardown+rebuild runs EXACTLY ONCE
+  // per new epoch; duplicate/older epochs are ignored completely.
+  const myEpochRef = useRef(0);
+  const partnerEpochRef = useRef(0);
+  const localNameRef = useRef(localName);
+  localNameRef.current = localName;
+
+  const emitJoin = useCallback(
+    (force = false) => {
+      const clientId = getClientId();
+      const key = `${socket.id}:${sessionId}:${clientId}`;
+      if (!force && lastJoinKeyRef.current === key) return;
+      lastJoinKeyRef.current = key;
+      saveRejoin({ code: sessionId, name: localNameRef.current, clientId });
+      socket.emit("join-session", {
+        sessionId,
+        name: localNameRef.current,
+        clientId,
+      });
+    },
+    [socket, sessionId],
+  );
+  const emitJoinRef = useRef(emitJoin);
+  emitJoinRef.current = emitJoin;
+
+  // Join signaling session + wire rejoin flows (Part 3 of the design)
   useEffect(() => {
     if (!sessionId) return;
 
@@ -321,38 +361,68 @@ export function Communication() {
       if (payload.sessionId !== sessionId) return;
       setJoined(true);
       setSessionError(null);
+      // Role derived once from the stable seat — constant for the session.
       if (typeof payload.initiator === "boolean") {
         setServerInitiator(payload.initiator);
       }
       if (payload.name) setLocalName(payload.name);
       if (payload.peerName) setPeerName(payload.peerName);
-      const effective = payload.initiator ?? initiatorRef.current;
-      if (payload.peerCount === 2 && effective) {
-        setTimeout(() => void sendOfferRef.current(), 400);
+      const epoch = payload.epoch ?? 1;
+      if (epoch === myEpochRef.current) return; // duplicate/older epoch
+      myEpochRef.current = epoch;
+      // Exactly one rebuild per new epoch of MY seat.
+      if (payload.partnerState === "connected" && initiatorRef.current) {
+        peerRef.current.rebuildAndOffer();
+      } else {
+        peerRef.current.rebuildForAnswer();
       }
     };
     const onPeerJoined = (payload: PeerJoinedEvent) => {
       if (payload.sessionId !== sessionId) return;
-      peer.setConnectionState("connecting");
+      peerRef.current.setConnectionState("connecting");
       if (payload.name) setPeerName(payload.name);
       if (initiatorRef.current) {
         setTimeout(() => void sendOfferRef.current(), 400);
       }
     };
-    const onRoleUpdate = (payload: SessionRoleEvent) => {
+    const onPeerAway = (payload: PeerAwayEvent) => {
       if (payload.sessionId !== sessionId) return;
-      // Server promoted us to initiator after the previous one left
-      // (e.g. simultaneous reloads) — take over offer duty.
-      if (payload.initiator) setServerInitiator(true);
+      // Partner's socket dropped: tear down ONLY the pc; keep camera/mic,
+      // the session screen, and chat history. Wait for their rejoin.
+      peerRef.current.teardownPeer();
+      peerRef.current.setConnectionState("waiting");
+      if (payload.name) setPeerName(payload.name);
+    };
+    const onPeerRejoined = (payload: PeerRejoinedEvent) => {
+      if (payload.sessionId !== sessionId) return;
+      const epoch = payload.epoch ?? 1;
+      if (epoch <= partnerEpochRef.current) return; // duplicate/older epoch
+      partnerEpochRef.current = epoch;
+      if (payload.name) setPeerName(payload.name);
+      // Exactly one rebuild per new epoch of the PARTNER's seat. Role is
+      // stable: seat 0 (initiator) offers, seat 1 answers.
+      if (initiatorRef.current) {
+        peerRef.current.rebuildAndOffer();
+      } else {
+        peerRef.current.rebuildForAnswer();
+      }
     };
     const onSessionError = (payload: SessionErrorEvent) => {
       if (payload.sessionId !== sessionId) return;
+      if (payload.reason === "invalid" && joinedRef.current) {
+        // The server says the session is truly gone (grace window expired).
+        clearRejoin();
+        navigate("/", { state: { notice: "Session ended." } });
+        return;
+      }
       setSessionError(payload.message);
-      peer.setConnectionState("failed");
+      peerRef.current.setConnectionState("failed");
     };
     const onPeerLeft = (payload: { sessionId: string }) => {
       if (payload.sessionId !== sessionId) return;
-      peer.setConnectionState("ended");
+      // Partner explicitly left: seat freed — wait for a (re)join.
+      peerRef.current.teardownPeer();
+      peerRef.current.setConnectionState("waiting");
     };
     const onScreenShareState = (payload: { sessionId: string; active?: boolean }) => {
       if (payload.sessionId !== sessionId) return;
@@ -361,35 +431,42 @@ export function Communication() {
 
     socket.on("session-joined", onJoined);
     socket.on("peer-joined", onPeerJoined);
-    socket.on("session-role", onRoleUpdate);
+    socket.on("peer-away", onPeerAway);
+    socket.on("peer-rejoined", onPeerRejoined);
     socket.on("session-error", onSessionError);
     socket.on("peer-left", onPeerLeft);
     socket.on("screen-share-state", onScreenShareState);
 
-    socket.emit("join-session", { sessionId, name: localName });
+    emitJoinRef.current();
 
     return () => {
       // No leave-session here: explicit exits (Back/End call) and tab close
       // (beforeunload) already emit it. Cleanup-time emission breaks dev
-      // StrictMode remounts with spurious peer-left / role flips.
+      // StrictMode remounts with spurious peer-away / role flips.
       socket.off("session-joined", onJoined);
       socket.off("peer-joined", onPeerJoined);
-      socket.off("session-role", onRoleUpdate);
+      socket.off("peer-away", onPeerAway);
+      socket.off("peer-rejoined", onPeerRejoined);
       socket.off("session-error", onSessionError);
       socket.off("peer-left", onPeerLeft);
       socket.off("screen-share-state", onScreenShareState);
     };
-  }, [sessionId, socket, localName]);
+  }, [sessionId, socket, navigate]);
 
-  // Offer retry — only when signaling stable and not yet connected/chat open
+  // Offer retry — touches ONLY the current peer connection: never emits
+  // join, never tears down or rebuilds, never changes the role.
   useEffect(() => {
     if (!joined || !effectiveInitiator) return;
     if (peer.channelOpen) return;
     const pc = peer.managerRef.current?.pc;
-    if (pc && pc.signalingState !== "stable") return;
+    if (!pc) return;
+    if (pc.connectionState === "connected") return;
+    if (pc.signalingState !== "stable") return;
     const fire = () => {
       const currentPc = peer.managerRef.current?.pc;
-      if (currentPc && currentPc.signalingState !== "stable") return;
+      if (!currentPc || currentPc !== pc) return;
+      if (currentPc.connectionState === "connected") return;
+      if (currentPc.signalingState !== "stable") return;
       void sendOfferRef.current();
     };
     fire();
@@ -413,19 +490,53 @@ export function Communication() {
     if (media.stream) peer.setLocalStream(media.stream);
   }, [media.stream]);
 
-  // Cleanup on unmount / tab close.
+  // NOTE: no leave-session on beforeunload — a refresh/tab-close must take
+  // the DISCONNECT path (seat held "away"), never free the seat. Only the
+  // explicit Leave button emits leave-session.
+  // Stop media only on unmount — [media] would re-run every render
+  // (media is a new object each render) and kill the camera tracks.
   useEffect(() => {
-    const handleBeforeUnload = () => {
-      socket.emit("leave-session", { sessionId });
-    };
-    window.addEventListener("beforeunload", handleBeforeUnload);
     return () => {
-      window.removeEventListener("beforeunload", handleBeforeUnload);
       media.stop();
     };
-  }, [sessionId]);
+  }, []);
+
+  // Socket reconnect (pure network drop — page never reloaded): the join
+  // guard re-emits automatically because socket.id changed.
+  useEffect(() => {
+    if (!sessionId) return;
+    const onConnect = () => {
+      emitJoinRef.current();
+    };
+    socket.on("connect", onConnect);
+    return () => {
+      socket.off("connect", onConnect);
+    };
+  }, [sessionId, socket]);
+
+  // Design Part 3 step 6: if auto-rejoin hasn't succeeded after ~15s, offer
+  // explicit recovery actions instead of silently waiting forever.
+  const [rejoinStuck, setRejoinStuck] = useState(false);
+  useEffect(() => {
+    if (joined) {
+      setRejoinStuck(false);
+      return;
+    }
+    const t = window.setTimeout(() => setRejoinStuck(true), 15000);
+    return () => window.clearTimeout(t);
+  }, [joined]);
+
+  const handleManualRejoin = useCallback(() => {
+    emitJoinRef.current(true); // force — explicit user action
+  }, []);
+
+  const handleLeaveToLanding = useCallback(() => {
+    clearRejoin();
+    navigate("/", { replace: true });
+  }, [navigate]);
 
   const handleEnd = useCallback(() => {
+    clearRejoin();
     void stopScreenShareRef.current();
     socket.emit("leave-session", { sessionId });
     media.stop();
@@ -513,6 +624,25 @@ export function Communication() {
           </div>
           {sessionError && (
             <p className="mx-auto w-full max-w-7xl px-4 pb-2 text-sm text-red-300">{sessionError}</p>
+          )}
+          {rejoinStuck && !joined && (
+            <div className="mx-auto flex w-full max-w-7xl items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-200">
+              <span>Still trying to reach the session…</span>
+              <span className="flex gap-2">
+                <button
+                  onClick={handleManualRejoin}
+                  className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-[#13131B] transition hover:brightness-110"
+                >
+                  Rejoin with code
+                </button>
+                <button
+                  onClick={handleLeaveToLanding}
+                  className="rounded-lg border border-border bg-panel3 px-3 py-1.5 text-xs font-semibold text-ink transition hover:brightness-125"
+                >
+                  Leave
+                </button>
+              </span>
+            </div>
           )}
           {peer.error && (
             <p className="mx-auto w-full max-w-7xl px-4 pb-2 text-sm text-amber-300">{peer.error}</p>
@@ -682,19 +812,23 @@ function StatusPill({ status, channelOpen }: { status: ConnectionState; channelO
         ? "● Connecting chat..."
         : status === "connecting"
           ? "● Connecting to peer..."
-          : status === "ended"
-            ? "○ Connection ended"
-            : status === "failed"
-              ? "● Unable to establish a direct connection."
-              : "○ Waiting for connection...";
+          : status === "waiting"
+            ? "○ Partner disconnected — waiting for them to rejoin…"
+            : status === "ended"
+              ? "○ Connection ended"
+              : status === "failed"
+                ? "● Unable to establish a direct connection."
+                : "○ Waiting for connection...";
   const color =
     status === "connected" && channelOpen
       ? "text-emerald-300 border-emerald-500/30 bg-emerald-500/10"
       : status === "connecting"
         ? "text-amber-300 border-amber-500/30 bg-amber-500/10"
-        : status === "failed"
-          ? "text-red-300 border-red-500/30 bg-red-500/10"
-          : "text-muted border-border bg-panel3";
+        : status === "waiting"
+          ? "text-amber-300 border-amber-500/30 bg-amber-500/10"
+          : status === "failed"
+            ? "text-red-300 border-red-500/30 bg-red-500/10"
+            : "text-muted border-border bg-panel3";
   return (
     <span className={`rounded-full border px-3 py-1.5 text-xs font-medium ${color}`}>{text}</span>
   );

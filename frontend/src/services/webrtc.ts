@@ -46,47 +46,54 @@ export class PeerConnectionManager {
       this.cleanup("create-entering");
     }
     log();
-    this.pc = new RTCPeerConnection(getRtcConfig());
+    const pc = new RTCPeerConnection(getRtcConfig());
+    this.pc = pc;
     this.remoteCandidates = [];
 
-    this.pc.onicecandidate = (ev) => {
+    // Guard every handler against the pc it belongs to: after a teardown+
+    // rebuild the OLD pc still fires close/state events — they must never
+    // overwrite the state of the CURRENT connection.
+    pc.onicecandidate = (ev) => {
+      if (this.pc !== pc) return;
       if (ev.candidate) {
         log("ICE candidate sent");
         if (this.onIceCandidate) this.onIceCandidate(ev.candidate);
       }
     };
 
-    this.pc.onconnectionstatechange = () => {
-      if (!this.pc) return;
-      log("Peer connection state:", this.pc.connectionState);
+    pc.onconnectionstatechange = () => {
+      if (this.pc !== pc) return;
+      log("Peer connection state:", pc.connectionState);
       log(
         "connectionState:",
-        this.pc.connectionState,
+        pc.connectionState,
         "ice:",
-        this.pc.iceConnectionState,
+        pc.iceConnectionState,
         "signaling:",
-        this.pc.signalingState,
+        pc.signalingState,
       );
       if (this.onConnectionState) {
-        this.onConnectionState(this.pc.connectionState);
+        this.onConnectionState(pc.connectionState);
       }
     };
 
-    this.pc.oniceconnectionstatechange = () => {
-      if (!this.pc) return;
-      log("ICE connection state:", this.pc.iceConnectionState);
+    pc.oniceconnectionstatechange = () => {
+      if (this.pc !== pc) return;
+      log("ICE connection state:", pc.iceConnectionState);
     };
 
-    this.pc.onsignalingstatechange = () => {
-      if (!this.pc) return;
-      log("signalingState:", this.pc.signalingState);
+    pc.onsignalingstatechange = () => {
+      if (this.pc !== pc) return;
+      log("signalingState:", pc.signalingState);
     };
 
-    this.pc.ontrack = (ev) => {
+    pc.ontrack = (ev) => {
+      if (this.pc !== pc) return;
       if (this.onTrack) this.onTrack(ev);
     };
 
-    this.pc.ondatachannel = (ev) => {
+    pc.ondatachannel = (ev) => {
+      if (this.pc !== pc) return;
       const channel = ev.channel;
       const label = channel.label;
       log("Incoming DataChannel:", label);
@@ -275,5 +282,9 @@ export class PeerConnectionManager {
     this.fileChannel = null;
     this.pc = null;
     this.remoteCandidates = [];
+    // Reset ALL negotiation state — leftover flags from a dead connection
+    // are the top cause of "rejoined but no video".
+    this.makingOffer = false;
+    this.ignoreOffer = false;
   }
 }

@@ -265,6 +265,9 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     }
   }, [sessionId, socket, bindChannel]);
 
+  const sendOfferRef = useRef(sendOffer);
+  sendOfferRef.current = sendOffer;
+
   // Main setup effect — exactly ONE RTCPeerConnection per mount.
   useEffect(() => {
     const manager = new PeerConnectionManager();
@@ -421,13 +424,11 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
 
     const onPeerLeft = (payload: PeerLeftEvent) => {
       if (payload.sessionId !== sessionId) return;
-      setConnectionState("ended");
-      setChannelOpen(false);
-      setChatState("closed");
-      setFileState("closed");
-      // Clear remote video so UI returns to "Waiting for remote video..."
-      remoteMediaRef.current = new MediaStream();
-      setRemoteStream(remoteMediaRef.current);
+      // Partner explicitly left (or their seat was freed): tear down ONLY the
+      // peer connection — own media, session and chat history stay. Wait for
+      // a (re)join; the normal offer flow rebuilds when they return.
+      teardownPeer();
+      setConnectionState("waiting");
     };
 
     socket.on("webrtc-offer", onOffer);
@@ -554,6 +555,79 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     [],
   );
 
+  // PART 4 teardown: close the pc, clear the remote stream, and reset ALL
+  // negotiation state (flags/timers/queued ICE reset inside manager.cleanup
+  // and here). Runs on peer-away/peer-left and before any rebuild.
+  const teardownPeer = useCallback(() => {
+    if (iceRestartTimer.current) {
+      window.clearTimeout(iceRestartTimer.current);
+      iceRestartTimer.current = null;
+    }
+    iceRestartRetries.current = 0;
+    lastOfferAt.current = 0;
+    managerRef.current?.cleanup("teardown");
+    setChannelOpen(false);
+    setChatState("closed");
+    setFileState("closed");
+    remoteMediaRef.current = new MediaStream();
+    setRemoteStream(remoteMediaRef.current);
+  }, []);
+
+  // Attach the CURRENT local stream's tracks to the (fresh) pc. After a
+  // refresh the stream is null — the normal getUserMedia start flow re-runs
+  // on mount and the late-attach effect feeds it in.
+  const attachCurrentTracks = useCallback(() => {
+    const manager = managerRef.current;
+    const stream = localStreamRef.current;
+    if (!manager?.pc || !stream) return;
+    for (const track of stream.getTracks()) {
+      try {
+        manager.pc.addTrack(track, stream);
+      } catch {
+        /* already added */
+      }
+    }
+  }, []);
+
+  // A pc that has NEVER negotiated (no local/remote description) is virgin —
+  // a fresh page join already provides one, so an epoch rebuild must reuse it
+  // instead of creating a second connection.
+  const pcIsVirgin = useCallback(() => {
+    const pc = managerRef.current?.pc;
+    return !!pc && !pc.localDescription && !pc.remoteDescription;
+  }, []);
+
+  // The RETURNING member: brand-new pc in answerer mode, waiting for the
+  // offer from the member who stayed. A virgin pc from the fresh page join
+  // is reused as-is.
+  const rebuildForAnswer = useCallback(() => {
+    if (!pcIsVirgin()) {
+      teardownPeer();
+      managerRef.current?.create(false);
+      attachCurrentTracks();
+    }
+    setConnectionState("connecting");
+    setChatState("connecting");
+    setFileState("connecting");
+  }, [teardownPeer, attachCurrentTracks, pcIsVirgin]);
+
+  // The member who STAYED: brand-new pc and SEND THE OFFER (fixed role).
+  const rebuildAndOffer = useCallback(() => {
+    if (!pcIsVirgin()) {
+      teardownPeer();
+      managerRef.current?.create(true);
+      attachCurrentTracks();
+    } else {
+      managerRef.current?.ensureDataChannels(true);
+      roleRef.current = true;
+    }
+    roleRef.current = true;
+    setConnectionState("connecting");
+    setChatState("connecting");
+    setFileState("connecting");
+    void sendOfferRef.current();
+  }, [teardownPeer, attachCurrentTracks, pcIsVirgin]);
+
   const sendMessage = useCallback(
     (text: string) => {
       const trimmed = text.trim();
@@ -679,6 +753,9 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     setLocalStream,
     replaceVideoTrack,
     replaceAudioTrack,
+    teardownPeer,
+    rebuildForAnswer,
+    rebuildAndOffer,
     managerRef,
   };
 }

@@ -1,22 +1,41 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { ArrowRight, ShieldCheck, Zap } from "lucide-react";
 import { useSocket } from "../hooks/useSocket";
 import { ConnectionCard } from "../components/connection/ConnectionCard";
 import { ConnectionId } from "../components/connection/ConnectionId";
 import { ConnectionStatus } from "../components/connection/ConnectionStatus";
+import { getClientId, readRejoin } from "../utils/rejoin";
 import type { ConnectionState } from "../types/webrtc";
 import type { SessionErrorEvent } from "../types/signaling";
 
 export function Landing() {
   const socket = useSocket();
   const navigate = useNavigate();
+  const location = useLocation();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [joinId, setJoinId] = useState("");
   const [name, setName] = useState("");
   const [status, setStatus] = useState<ConnectionState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [notice] = useState<string | null>(
+    (location.state as { notice?: string } | null)?.notice ?? null,
+  );
+
+  // Per-tab auto-rejoin: a saved session (survives refresh, cleared on
+  // Leave) skips the join form entirely. A "Session ended" notice means the
+  // server confirmed the code is gone — show the form instead.
+  useEffect(() => {
+    if (notice) return;
+    const saved = readRejoin();
+    if (saved?.code) {
+      navigate(`/session/${saved.code}`, { state: { name: saved.name } });
+      return;
+    }
+    // Prepare the per-tab identity early so the first join already carries it.
+    getClientId();
+  }, [navigate, notice]);
 
   useEffect(() => {
     const onCreated = (payload: { sessionId: string }) => {
@@ -53,7 +72,7 @@ export function Landing() {
     }
     setError(null);
     setCreating(true);
-    socket.emit("create-session", { name: trimmedName });
+    socket.emit("create-session", { name: trimmedName, clientId: getClientId() });
   };
 
   const join = () => {
@@ -92,6 +111,11 @@ export function Landing() {
       </div>
 
       <ConnectionCard>
+        {notice && (
+          <p className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+            {notice}
+          </p>
+        )}
         <label className="text-xs font-medium uppercase tracking-widest text-muted">
           Enter your name
         </label>

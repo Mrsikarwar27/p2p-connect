@@ -9,6 +9,10 @@ export interface SessionJoinedEvent {
   initiator: boolean;
   name: string;
   peerName?: string;
+  /** Other seat: "connected" | "away" | "none" */
+  partnerState?: "connected" | "away" | "none";
+  /** My seat's connection epoch — rebuild exactly once per new value. */
+  epoch?: number;
 }
 
 export interface PeerJoinedEvent {
@@ -21,6 +25,22 @@ export interface PeerJoinedEvent {
 export interface SessionRoleEvent {
   sessionId: string;
   initiator: boolean;
+}
+
+/** Partner's socket dropped unexpectedly — their seat is held. */
+export interface PeerAwayEvent {
+  sessionId: string;
+  peerId: string;
+  name?: string;
+}
+
+/** Partner reclaimed their seat (refresh / reconnect / new tab, same code). */
+export interface PeerRejoinedEvent {
+  sessionId: string;
+  peerId: string;
+  name?: string;
+  /** Partner seat's new connection epoch — handle exactly once. */
+  epoch?: number;
 }
 
 export interface WatchSyncEvent {
