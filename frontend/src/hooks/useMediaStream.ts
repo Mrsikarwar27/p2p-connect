@@ -14,7 +14,7 @@ export function useMediaStream(): MediaState & {
   stop: () => void;
   toggleMic: () => void;
   toggleCamera: () => void;
-  switchCamera: () => Promise<void>;
+  switchCamera: () => Promise<MediaStreamTrack | undefined>;
 } {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [micOn, setMicOn] = useState(true);
@@ -61,22 +61,62 @@ export function useMediaStream(): MediaState & {
         return streamRef.current;
       }
       await enumerateVideoDevices();
-      const stream = await navigator.mediaDevices.getUserMedia(getConstraints(facingMode));
-      streamRef.current = stream;
-      setStream(stream);
-      setStarted(true);
-      setMicOn(true);
-      setCameraOn(true);
-      return stream;
+
+      // Fallback chain: audio+video → video-only → audio-only
+      let attempts: { video: boolean; audio: boolean; label: string }[] = [
+        { video: true, audio: true, label: "audio+video" },
+        { video: true, audio: false, label: "video-only" },
+        { video: false, audio: true, label: "audio-only" },
+      ];
+
+      let lastErr: unknown = null;
+      for (const attempt of attempts) {
+        try {
+          const videoPart = attempt.video ? getConstraints(facingMode) : false;
+          const constraints: MediaStreamConstraints = videoPart ? { ...videoPart, audio: attempt.audio } : { video: false, audio: attempt.audio };
+          const s = await navigator.mediaDevices.getUserMedia(constraints);
+          streamRef.current = s;
+          setStream(s);
+          setStarted(true);
+          const audioTracks = s.getAudioTracks();
+          const videoTracks = s.getVideoTracks();
+          setMicOn(audioTracks.some((t) => t.readyState === "live" && t.enabled));
+          setCameraOn(videoTracks.some((t) => t.readyState === "live" && t.enabled));
+          if (attempt.label !== "audio+video") {
+            setError(
+              attempt.label === "video-only"
+                ? "Microphone not available. Connected with camera only."
+                : "Camera not available. Connected with microphone only.",
+            );
+          }
+          return s;
+        } catch (err) {
+          lastErr = err;
+          const errName = (err as DOMException | null)?.name;
+          // For NotFoundError / OverconstrainedError on audio+video, continue to next attempt
+          if (attempt.label === "audio+video" && (errName === "NotFoundError" || errName === "OverconstrainedError")) {
+            continue;
+          }
+          // For video-only, if video fails but audio works in audio-only attempt, continue
+          if (attempt.label !== "audio-only") {
+            continue;
+          }
+          // Final attempt failed — throw to outer catch
+          throw err;
+        }
+      }
+      // If we exhaust attempts without throwing, treat as failure
+      throw lastErr;
     } catch (err) {
       console.warn("getUserMedia failed", err);
       const name = (err as DOMException | null)?.name;
-      const detail =
-        err instanceof Error && err.message ? `: ${err.message}` : "";
+      const detail = err instanceof Error && err.message ? `: ${err.message}` : "";
       switch (name) {
         case "NotFoundError":
         case "OverconstrainedError":
-          console.info("No camera/microphone found. Chat and file sharing still available.");
+          setError(
+            "No camera or microphone found. Chat and file sharing still available.",
+          );
           break;
         case "NotAllowedError":
         case "PermissionDeniedError":
@@ -159,61 +199,56 @@ export function useMediaStream(): MediaState & {
 
   const switchCamera = useCallback(async () => {
     const s = streamRef.current;
-    if (!s) return;
+    if (!s) return undefined;
 
     const nextFacing = facingMode === "user" ? "environment" : "user";
     let newStream: MediaStream | null = null;
     let newVideoTrack: MediaStreamTrack | null = null;
 
     try {
-      // First, try to get the new camera stream
       await enumerateVideoDevices();
 
-      // Try with deviceId if we have multiple cameras
-      let constraints = getConstraints(nextFacing);
+      // Request VIDEO ONLY (no audio)
+      let videoConstraints: boolean | MediaTrackConstraints = { facingMode: { ideal: nextFacing } };
       if (deviceIdsRef.current.length > 1) {
-        // Find the next available camera device
         currentDeviceIndexRef.current = (currentDeviceIndexRef.current + 1) % deviceIdsRef.current.length;
-        const nextDeviceId = deviceIdsRef.current[currentDeviceIndexRef.current];
-        constraints = getConstraints(nextFacing, nextDeviceId);
+        videoConstraints = { deviceId: { exact: deviceIdsRef.current[currentDeviceIndexRef.current] }, facingMode: undefined };
       }
-
-      newStream = await navigator.mediaDevices.getUserMedia(constraints);
+      newStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
       newVideoTrack = newStream.getVideoTracks()[0];
 
       if (!newVideoTrack) {
         throw new Error("No video track in new stream");
       }
-
-      // Verify the new track is live
       if (newVideoTrack.readyState !== "live") {
         throw new Error("New video track not live");
       }
 
-      // Replace the track in the existing stream (preserves audio)
       const oldVideoTracks = s.getVideoTracks();
-      s.addTrack(newVideoTrack);
 
-      // Update facing mode and stream reference
-      setFacingMode(nextFacing);
-      setStream(new MediaStream(s.getTracks()));
-
-      // Now stop old video tracks AFTER successful replacement
+      // Stop old tracks FIRST, then add new one (so stream never has two live video tracks)
       oldVideoTracks.forEach((t) => t.stop());
 
-      // Clean up the temporary stream (audio tracks)
-      newStream.getAudioTracks().forEach((t) => t.stop());
+      s.addTrack(newVideoTrack);
+      streamRef.current = s; // same stream object, updated tracks
+      setFacingMode(nextFacing);
+      setStream(new MediaStream(s.getTracks()));
+      setCameraOn(true);
 
+      // Clean up temporary stream (audio tracks should be none, but guard anyway)
+      newStream.getAudioTracks().forEach((t) => t.stop());
+      newStream.getVideoTracks().forEach((t) => {
+        if (t !== newVideoTrack) t.stop();
+      });
+
+      return newVideoTrack;
     } catch (err) {
       console.warn("Camera switch failed", err);
       setError("Could not switch camera. This device may not have a rear camera.");
-
-      // Cleanup failed stream if any
       if (newStream) {
         newStream.getTracks().forEach((t) => t.stop());
       }
-
-      // Keep current camera working - don't break existing stream
+      return undefined;
     }
   }, [facingMode, enumerateVideoDevices]);
 

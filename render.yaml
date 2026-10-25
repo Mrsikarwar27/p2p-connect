@@ -2,6 +2,7 @@ services:
   - type: web
     name: p2p-connect
     runtime: node
+    rootDir: backend
     plan: free
     buildCommand: npm run render-build
     startCommand: npm start
@@ -10,6 +11,14 @@ services:
         value: production
       - key: NPM_CONFIG_PRODUCTION
         value: "false"
-      # PORT is automatically provided by Render
-      # CLIENT_URL: set to your actual Render URL after first deploy (e.g., https://p2p-connect-xyz.onrender.com)
+      - key: PORT
+        generateValue: false
+      - key: CLIENT_URL
+        value: https://p2p-connect-wpwy.onrender.com
+      - key: VITE_TURN_URL
+        sync: false
+      - key: VITE_TURN_USERNAME
+        sync: false
+      - key: VITE_TURN_CREDENTIAL
+        sync: false
     healthCheckPath: /health

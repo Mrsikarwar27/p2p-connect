@@ -27,4 +27,5 @@ export type ControlMessage =
       size: number;
       mimeType: string;
     }
-  | { kind: "file-end"; fileId: string };
+  | { kind: "file-end"; fileId: string }
+  | { kind: "file-cancel"; fileId: string };

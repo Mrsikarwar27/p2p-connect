@@ -17,6 +17,7 @@ import type {
   PeerJoinedEvent,
   SessionErrorEvent,
   SessionJoinedEvent,
+  SessionRoleEvent,
 } from "../types/signaling";
 
 export function Communication() {
@@ -70,12 +71,9 @@ export function Communication() {
   }, []);
 
   const handleSwitchCamera = useCallback(async () => {
-    await media.switchCamera();
-    if (media.stream) {
-      const videoTrack = media.stream.getVideoTracks()[0];
-      if (videoTrack) {
-        await peer.replaceVideoTrack(videoTrack);
-      }
+    const newTrack = await media.switchCamera();
+    if (newTrack) {
+      await peer.replaceVideoTrack(newTrack);
     }
   }, [media, peer]);
 
@@ -109,6 +107,12 @@ export function Communication() {
         setTimeout(() => void sendOfferRef.current(), 400);
       }
     };
+    const onRoleUpdate = (payload: SessionRoleEvent) => {
+      if (payload.sessionId !== sessionId) return;
+      // Server promoted us to initiator after the previous one left
+      // (e.g. simultaneous reloads) — take over offer duty.
+      if (payload.initiator) setServerInitiator(true);
+    };
     const onSessionError = (payload: SessionErrorEvent) => {
       if (payload.sessionId !== sessionId) return;
       setSessionError(payload.message);
@@ -121,24 +125,33 @@ export function Communication() {
 
     socket.on("session-joined", onJoined);
     socket.on("peer-joined", onPeerJoined);
+    socket.on("session-role", onRoleUpdate);
     socket.on("session-error", onSessionError);
     socket.on("peer-left", onPeerLeft);
 
     socket.emit("join-session", { sessionId, name: localName });
 
     return () => {
+      // No leave-session here: explicit exits (Back/End call) and tab close
+      // (beforeunload) already emit it. Cleanup-time emission breaks dev
+      // StrictMode remounts with spurious peer-left / role flips.
       socket.off("session-joined", onJoined);
       socket.off("peer-joined", onPeerJoined);
+      socket.off("session-role", onRoleUpdate);
       socket.off("session-error", onSessionError);
       socket.off("peer-left", onPeerLeft);
     };
   }, [sessionId, socket, localName]);
 
-  // Offer retry
+  // Offer retry — only when signaling stable and not yet connected/chat open
   useEffect(() => {
     if (!joined || !effectiveInitiator) return;
     if (peer.channelOpen) return;
+    const pc = peer.managerRef.current?.pc;
+    if (pc && pc.signalingState !== "stable") return;
     const fire = () => {
+      const currentPc = peer.managerRef.current?.pc;
+      if (currentPc && currentPc.signalingState !== "stable") return;
       void sendOfferRef.current();
     };
     fire();
@@ -270,6 +283,7 @@ export function Communication() {
             remoteStream={peer.remoteStream}
             cameraOn={media.cameraOn}
             localName={localName}
+            isLocalMain={isLocalMain}
             onSwapVideos={swapVideos}
           />
           <WatchTogetherPanel
@@ -332,11 +346,13 @@ export function Communication() {
             onAttach={openFilePicker}
             disabled={!peer.channelOpen}
           />
-          <p className="border-t border-border px-4 py-1.5 font-mono text-[10px] leading-relaxed text-muted/60">
-            sock={socket.connected ? "up" : "down"} joined={String(joined)} init=
-            {String(effectiveInitiator)} pc={peer.connectionState} chat={peer.chatState} file=
-            {peer.fileState} ch={peer.channelOpen ? "open" : "shut"}
-          </p>
+          {import.meta.env.DEV && (
+            <p className="border-t border-border px-4 py-1.5 font-mono text-[10px] leading-relaxed text-muted/60">
+              sock={socket.connected ? "up" : "down"} joined={String(joined)} init=
+              {String(effectiveInitiator)} pc={peer.connectionState} chat={peer.chatState} file=
+              {peer.fileState} ch={peer.channelOpen ? "open" : "shut"}
+            </p>
+          )}
           <input
             ref={fileInputRef}
             type="file"

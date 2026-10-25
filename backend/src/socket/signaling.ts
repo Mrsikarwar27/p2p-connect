@@ -27,9 +27,10 @@ interface CandidatePayload {
 
 interface WatchPayload {
   sessionId?: string;
-  action: "load" | "play" | "pause" | "seek" | "state" | "playlist-add" | "playlist-remove" | "playlist-play";
+  action: "load" | "play" | "pause" | "seek" | "state" | "sync" | "playlist-add" | "playlist-remove" | "playlist-play";
   videoId?: string;
   currentTime?: number;
+  isPlaying?: boolean;
   playlistIndex?: number;
 }
 
@@ -49,6 +50,7 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
         return;
       }
       socket.join(session.id);
+      sessions.claimInitiator(session.id, socket.id);
       socket.emit("session-created", { sessionId: session.id });
     });
 
@@ -64,6 +66,10 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
         });
         return;
       }
+      // Membership must be checked BEFORE addPeer() mutates the session,
+      // otherwise alreadyPeer is always true and peer-joined never fires.
+      const sessionBefore = sessions.get(sessionId);
+      const alreadyPeer = sessionBefore ? sessionBefore.peers.includes(socket.id) : false;
       const result = sessions.addPeer(sessionId, socket.id, name || undefined);
       if (!result.ok) {
         if (result.reason === "full") {
@@ -84,11 +90,13 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
         return;
       }
       socket.join(sessionId);
+      sessions.claimInitiator(sessionId, socket.id);
       const session = result.session;
-      // First peer in the session is the initiator; second is the receiver.
-      // This is authoritative — clients must not rely solely on router state,
-      // which is lost on refresh / direct navigation.
-      const initiator = session.peers[0] === socket.id;
+      // Authoritative role from the session's initiatorId — this is computed
+      // from live peers only, so join-order races after simultaneous reloads
+      // can't leave both peers as answerers. Clients must not rely solely on
+      // router state, which is lost on refresh / direct navigation.
+      const initiator = session.initiatorId === socket.id;
       const otherPeerId = session.peers.find((id) => id !== socket.id);
       const otherPeerName = otherPeerId ? sessions.getPeerName(sessionId, otherPeerId) : undefined;
       console.log(
@@ -117,17 +125,21 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
           timestamp: Date.now(),
         });
       }
-      socket.to(sessionId).emit("peer-joined", {
-        sessionId,
-        peerId: socket.id,
-        peerCount: session.peers.length,
-        name,
-      });
+      if (!alreadyPeer) {
+        socket.to(sessionId).emit("peer-joined", {
+          sessionId,
+          peerId: socket.id,
+          peerCount: session.peers.length,
+          name,
+        });
+      }
     });
 
     socket.on("webrtc-offer", (payload: OfferPayload) => {
       if (!payload?.sessionId || !payload.offer) return;
       const sessionId = normalizeSessionId(payload.sessionId);
+      const session = sessions.get(sessionId);
+      if (!session || !session.peers.includes(socket.id)) return; // member check
       console.log(`[Signaling] Routing offer: ${sessionId} (from ${socket.id})`);
       socket.to(sessionId).emit("webrtc-offer", {
         sessionId,
@@ -139,6 +151,8 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
     socket.on("webrtc-answer", (payload: AnswerPayload) => {
       if (!payload?.sessionId || !payload.answer) return;
       const sessionId = normalizeSessionId(payload.sessionId);
+      const session = sessions.get(sessionId);
+      if (!session || !session.peers.includes(socket.id)) return; // member check
       console.log(`[Signaling] Routing answer: ${sessionId} (from ${socket.id})`);
       socket.to(sessionId).emit("webrtc-answer", {
         sessionId,
@@ -150,6 +164,8 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
     socket.on("ice-candidate", (payload: CandidatePayload) => {
       if (!payload?.sessionId || !payload.candidate) return;
       const sessionId = normalizeSessionId(payload.sessionId);
+      const session = sessions.get(sessionId);
+      if (!session || !session.peers.includes(socket.id)) return; // member check
       console.log(`[Signaling] Routing ICE candidate: ${sessionId} (from ${socket.id})`);
       socket.to(sessionId).emit("ice-candidate", {
         sessionId,
@@ -163,6 +179,7 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       const sessionId = rawId ? normalizeSessionId(rawId) : undefined;
       const session = sessions.sessionOfSocket(socket.id);
       const targetId = sessionId ?? session?.id;
+      sessions.removeSocket(socket.id);
       if (targetId) {
         console.log(`[Signaling] Peer left: ${targetId} (${socket.id})`);
         socket.leave(targetId);
@@ -170,8 +187,12 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
           sessionId: targetId,
           peerId: socket.id,
         });
+        const promoted = sessions.ensureInitiator(targetId);
+        if (promoted) {
+          console.log(`[Signaling] Initiator promoted: ${targetId} -> ${promoted}`);
+          io.to(promoted).emit("session-role", { sessionId: targetId, initiator: true });
+        }
       }
-      sessions.removeSocket(socket.id);
     });
 
     // Watch Together events
@@ -186,6 +207,30 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       // Validate the peer is in this session
       if (!session.peers.includes(socket.id)) return;
 
+      // Persist watch state before forwarding so late joiners get the real current state
+      if (payload.action === "load" && payload.videoId) {
+        sessions.setWatchState(sessionId, {
+          videoId: payload.videoId,
+          currentTime: payload.currentTime ?? 0,
+          isPlaying: payload.isPlaying ?? false,
+        }, socket.id);
+      } else if (payload.action === "play" || payload.action === "pause" || payload.action === "seek" || payload.action === "state" || payload.action === "sync") {
+        sessions.setWatchState(sessionId, {
+          videoId: payload.videoId ?? session.watchState.videoId ?? null,
+          currentTime: typeof payload.currentTime === "number" ? payload.currentTime : (payload.action === "seek" ? payload.currentTime ?? session.watchState.currentTime : session.watchState.currentTime),
+          isPlaying: payload.isPlaying ?? session.watchState.isPlaying,
+        }, socket.id);
+      } else if (payload.action === "playlist-add" && payload.videoId) {
+        sessions.addToPlaylist(sessionId, { videoId: payload.videoId }, socket.id);
+      } else if (payload.action === "playlist-remove" && typeof payload.playlistIndex === "number") {
+        sessions.removeFromPlaylist(sessionId, payload.playlistIndex);
+      } else if (payload.action === "playlist-play" && typeof payload.playlistIndex === "number") {
+        const item = session.watchState.playlist[payload.playlistIndex];
+        if (item) {
+          sessions.playPlaylistItem(sessionId, payload.playlistIndex, socket.id);
+        }
+      }
+
       // Only route to the other peer
       socket.to(sessionId).emit("watch:sync", {
         ...payload,
@@ -198,10 +243,15 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       sessions.removeSocket(socket.id);
       if (session) {
         console.log(`[Signaling] Peer disconnected: ${session.id} (${socket.id})`);
-        socket.to(session.id).emit("peer-left", {
+        io.to(session.id).emit("peer-left", {
           sessionId: session.id,
           peerId: socket.id,
         });
+        const promoted = sessions.ensureInitiator(session.id);
+        if (promoted) {
+          console.log(`[Signaling] Initiator promoted: ${session.id} -> ${promoted}`);
+          io.to(promoted).emit("session-role", { sessionId: session.id, initiator: true });
+        }
       }
     });
   });

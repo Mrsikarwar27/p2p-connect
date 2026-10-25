@@ -20,6 +20,7 @@ app.use(
   cors({
     origin: env.clientUrl,
     methods: ["GET", "POST"],
+    credentials: true,
   }),
 );
 app.use(express.json());

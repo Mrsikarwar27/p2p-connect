@@ -20,6 +20,9 @@ export class PeerConnectionManager {
   chatChannel: RTCDataChannel | null = null;
   fileChannel: RTCDataChannel | null = null;
   private remoteCandidates: RTCIceCandidateInit[] = [];
+  private makingOffer = false;
+  private ignoreOffer = false;
+  private isInitiator = false;
 
   onIceCandidate: ((candidate: RTCIceCandidate) => void) | null = null;
   onConnectionState: StateHandler | null = null;
@@ -38,6 +41,7 @@ export class PeerConnectionManager {
   }
 
   create(isInitiator: boolean): RTCPeerConnection {
+    this.isInitiator = isInitiator;
     if (this.pc || this.chatChannel || this.fileChannel) {
       this.cleanup("create-entering");
     }
@@ -137,18 +141,47 @@ export class PeerConnectionManager {
     }
   }
 
-  async createOffer(): Promise<RTCSessionDescriptionInit> {
+  async createOffer(options?: { iceRestart?: boolean }): Promise<RTCSessionDescriptionInit> {
     if (!this.pc) throw new Error("PeerConnection not created");
-    log("Creating offer");
-    const offer = await this.pc.createOffer();
-    await this.pc.setLocalDescription(offer);
-    log("Offer sent");
-    return offer;
+    if (this.makingOffer || this.pc.signalingState !== "stable") {
+      log("Skipping offer creation: makingOffer or signalingState not stable");
+      return Promise.reject(new Error("Offer creation skipped (collision or unstable state)"));
+    }
+    this.makingOffer = true;
+    log("Creating offer (perfect negotiation)", options);
+    try {
+      this.ensureDataChannels(this.isInitiator);
+      const offer = await this.pc.createOffer(options);
+      await this.pc.setLocalDescription(offer);
+      log("Offer sent");
+      return offer;
+    } finally {
+      this.makingOffer = false;
+    }
   }
 
   async handleOffer(offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> {
     if (!this.pc) throw new Error("PeerConnection not created");
     log("Offer received");
+    const offerCollision = this.makingOffer || this.pc.signalingState !== "stable";
+    if (offerCollision) {
+      // Perfect negotiation: polite peer (non-initiator) rolls back; impolite (initiator) ignores
+      if (this.isInitiator) {
+        this.ignoreOffer = true;
+        log("Impolite peer (initiator): ignoring colliding offer");
+      } else {
+        log("Polite peer (non-initiator): rolling back for offer collision");
+        try {
+          await this.pc.setLocalDescription({ type: "rollback" });
+        } catch (err) {
+          console.warn("Rollback failed", err);
+        }
+      }
+    }
+    if (this.ignoreOffer) {
+      this.ignoreOffer = false;
+      throw new Error("Colliding offer ignored (impolite peer)");
+    }
     await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
     log("Offer applied");
     await this.flushCandidates();
@@ -160,6 +193,11 @@ export class PeerConnectionManager {
 
   async handleAnswer(answer: RTCSessionDescriptionInit): Promise<void> {
     if (!this.pc) throw new Error("PeerConnection not created");
+    // Ignore stale/duplicate answers arriving when already stable
+    if (this.pc.signalingState === "stable") {
+      log("Ignoring stale/duplicate answer (already stable)");
+      return;
+    }
     log("Answer received");
     await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
     log("Answer applied");

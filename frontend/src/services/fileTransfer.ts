@@ -23,9 +23,13 @@ export function decodeChunk(buffer: ArrayBuffer): { fileId: string; chunk: Array
 
 export function waitForDrain(dc: RTCDataChannel): Promise<void> {
   if (dc.bufferedAmount <= MAX_BUFFERED) return Promise.resolve();
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const check = () => {
-      if (dc.bufferedAmount <= MAX_BUFFERED / 2 || dc.readyState !== "open") {
+      if (dc.readyState !== "open") {
+        reject(new Error("DataChannel closed"));
+        return;
+      }
+      if (dc.bufferedAmount <= MAX_BUFFERED / 2) {
         resolve();
       } else {
         setTimeout(check, 50);
@@ -53,7 +57,10 @@ export async function sendFileOverChannel(
 
   let offset = 0;
   while (offset < file.size) {
-    if (isCancelled()) throw new Error("cancelled");
+    if (isCancelled()) {
+      try { dc.send(JSON.stringify({ kind: "file-cancel", fileId })); } catch { /* noop */ }
+      throw new Error("cancelled");
+    }
     if (dc.readyState !== "open") throw new Error("DataChannel closed");
     await waitForDrain(dc);
     const slice = file.slice(offset, offset + CHUNK_SIZE);

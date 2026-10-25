@@ -5,6 +5,7 @@ interface VideoPanelProps {
   remoteStream: MediaStream | null;
   cameraOn: boolean;
   localName?: string;
+  isLocalMain: boolean;
   onSwapVideos: () => void;
 }
 
@@ -13,34 +14,53 @@ export function VideoPanel({
   remoteStream,
   cameraOn,
   localName,
+  isLocalMain,
   onSwapVideos,
 }: VideoPanelProps) {
   const remoteRef = useRef<HTMLVideoElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localWrapperRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-
-  const [isLocalMain, setIsLocalMain] = useState(false);
   const [localPos, setLocalPos] = useState({ x: 16, y: 16 });
   const [isDragging, setIsDragging] = useState(false);
   const dragOffset = useRef({ x: 0, y: 0 });
   const animationFrameRef = useRef<number | null>(null);
   const pendingPosRef = useRef({ x: 16, y: 16 });
 
+  // Assign the correct stream to the main video element based on swap state
   useEffect(() => {
-    if (remoteRef.current && remoteStream) {
-      remoteRef.current.srcObject = remoteStream;
+    const mainStream = isLocalMain ? localStream : remoteStream;
+    if (remoteRef.current) {
+      remoteRef.current.srcObject = mainStream ?? null;
+      if (!mainStream && remoteRef.current.srcObject) {
+        remoteRef.current.srcObject = null;
+      }
     }
-  }, [remoteStream]);
+  }, [isLocalMain, localStream, remoteStream]);
 
+  // Assign the correct stream to the preview video element based on swap state
   useEffect(() => {
-    if (localVideoRef.current && localStream) {
-      localVideoRef.current.srcObject = localStream;
+    const previewStream = isLocalMain ? remoteStream : localStream;
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = previewStream ?? null;
+      if (!previewStream && localVideoRef.current.srcObject) {
+        localVideoRef.current.srcObject = null;
+      }
     }
-  }, [localStream]);
+  }, [isLocalMain, localStream, remoteStream]);
 
-  const hasRemoteVideo = remoteStream && remoteStream.getVideoTracks().length > 0;
-  const hasLocalVideo = localStream && localStream.getVideoTracks().length > 0;
+  const mainVideoStream = isLocalMain ? localStream : remoteStream;
+  const mainVideoEnabled = isLocalMain
+    ? (localStream && localStream.getVideoTracks().some((t) => t.readyState === "live") && cameraOn)
+    : (remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live"));
+  const previewVideoStream = isLocalMain ? remoteStream : localStream;
+  const previewVideoEnabled = isLocalMain
+    ? (remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live"))
+    : (localStream && localStream.getVideoTracks().some((t) => t.readyState === "live") && cameraOn);
+  const previewCameraOn = isLocalMain ? (remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live")) : cameraOn;
+
+  const hasRemoteVideo = remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live");
+  const hasLocalVideo = localStream && localStream.getVideoTracks().some((t) => t.readyState === "live");
   const localVideoEnabled = hasLocalVideo && cameraOn;
 
   const handlePointerDown = useCallback(
@@ -121,14 +141,6 @@ export function VideoPanel({
   const handleVideoClick = () => {
     onSwapVideos();
   };
-
-  // Swap logic: click on small video makes it main
-  // When local is main, remote becomes small (and vice versa)
-  const mainVideoStream = isLocalMain ? localStream : remoteStream;
-  const mainVideoEnabled = isLocalMain ? localVideoEnabled : hasRemoteVideo;
-  const previewVideoStream = isLocalMain ? remoteStream : localStream;
-  const previewVideoEnabled = isLocalMain ? hasRemoteVideo : localVideoEnabled;
-  const previewCameraOn = isLocalMain ? hasRemoteVideo : cameraOn;
 
   return (
     <div className="relative min-h-[280px] flex-1 overflow-hidden rounded-2xl border border-border bg-black sm:min-h-[360px]" ref={containerRef}>

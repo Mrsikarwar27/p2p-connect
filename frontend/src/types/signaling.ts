@@ -18,6 +18,11 @@ export interface PeerJoinedEvent {
   name?: string;
 }
 
+export interface SessionRoleEvent {
+  sessionId: string;
+  initiator: boolean;
+}
+
 export interface WatchSyncEvent {
   sessionId: string;
   action: "load" | "play" | "pause" | "seek" | "state" | "sync" | "playlist-add" | "playlist-remove" | "playlist-play";

@@ -39,7 +39,8 @@ export type DataChannelStatus = "connecting" | "open" | "closed" | "failed";
 function mapPcState(s: RTCPeerConnectionState): ConnectionState {
   if (s === "connected") return "connected";
   if (s === "connecting") return "connecting";
-  if (s === "failed" || s === "disconnected") return "failed";
+  if (s === "failed") return "failed";
+  if (s === "disconnected") return "connecting"; // temporary, ICE recovery will attempt
   if (s === "closed") return "ended";
   return "connecting";
 }
@@ -56,11 +57,15 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
 
   const managerRef = useRef<PeerConnectionManager | null>(null);
   const incomingRef = useRef(new Map<string, IncomingFile>());
+  const transfersRef = useRef<FileTransferState[]>([]);
+  transfersRef.current = transfers;
   const cancelledRef = useRef(new Set<string>());
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteMediaRef = useRef(new MediaStream());
   const roleRef = useRef(isInitiator);
   roleRef.current = isInitiator;
+  const iceRestartRetries = useRef(0);
+  const iceRestartTimer = useRef<number | null>(null);
 
   const updateTransfer = useCallback((fileId: string, patch: Partial<FileTransferState>) => {
     setTransfers((prev) => prev.map((t) => (t.fileId === fileId ? { ...t, ...patch } : t)));
@@ -125,6 +130,10 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
           incomingRef.current.delete(msg.fileId);
           updateTransfer(msg.fileId, { status: "failed", error: "Could not assemble file." });
         }
+      } else if (msg.kind === "file-cancel") {
+        cancelledRef.current.add(msg.fileId);
+        incomingRef.current.delete(msg.fileId);
+        updateTransfer(msg.fileId, { status: "cancelled" });
       }
     },
     [updateTransfer],
@@ -273,6 +282,44 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
 
     manager.onConnectionState = (state) => {
       setConnectionState(mapPcState(state));
+      if (state === "connected") {
+        // Clear stale errors from early failed offer attempts
+        setError(null);
+      }
+      if (state === "disconnected") {
+        // ICE recovery: wait ~3s, then try restart if still disconnected
+        if (iceRestartTimer.current) window.clearTimeout(iceRestartTimer.current);
+        iceRestartTimer.current = window.setTimeout(() => {
+          const currentState = managerRef.current?.connectionState();
+          if (currentState === "disconnected" || currentState === "failed") {
+            if (iceRestartRetries.current < 3 && roleRef.current && managerRef.current) {
+              iceRestartRetries.current += 1;
+              console.log(`[ICE recover] attempt ${iceRestartRetries.current}`);
+              void (async () => {
+                try {
+                  const offer = await managerRef.current!.createOffer({ iceRestart: true });
+                  socket.emit("webrtc-offer", { sessionId, offer });
+                } catch (err) {
+                  console.warn("ICE restart offer failed", err);
+                }
+              })();
+            } else {
+              // Retries exhausted — show failure
+              setConnectionState("failed");
+              setError("Unable to establish a direct connection.");
+            }
+          }
+        }, 3000);
+      } else {
+        // Clear recovery timer on any non-disconnected state
+        if (iceRestartTimer.current) {
+          window.clearTimeout(iceRestartTimer.current);
+          iceRestartTimer.current = null;
+        }
+        if (state === "connected") {
+          iceRestartRetries.current = 0;
+        }
+      }
       if (state === "failed") {
         setError("Unable to establish a direct connection.");
       }
@@ -300,11 +347,9 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     pc.onnegotiationneeded = () => {
       // Only the initiator renegotiates to avoid glare.
       if (!roleRef.current) return;
-      if (!pc.localDescription) return;
       void (async () => {
         try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
+          const offer = await manager.createOffer();
           socket.emit("webrtc-offer", { sessionId, offer });
         } catch (err) {
           console.warn("Renegotiation failed", err);
@@ -353,7 +398,7 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
         setConnectionState("connecting");
       } catch (err) {
         console.error("handleOffer failed", err);
-        setError("Failed to accept connection.");
+        setError(`Failed to accept connection: ${err instanceof Error ? err.message : String(err)}`);
         setConnectionState("failed");
       }
     };
@@ -364,7 +409,7 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
         await manager.handleAnswer(payload.answer);
       } catch (err) {
         console.error("handleAnswer failed", err);
-        setError("Failed to establish connection.");
+        setError(`Failed to establish connection: ${err instanceof Error ? err.message : String(err)}`);
         setConnectionState("failed");
       }
     };
@@ -390,6 +435,19 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     socket.on("ice-candidate", onIce);
     socket.on("peer-left", onPeerLeft);
 
+    // TEMP DEBUG
+    (window as unknown as Record<string, unknown>).__p2pDebug = () => {
+      const m = managerRef.current;
+      return {
+        hasManager: !!m,
+        chat: m?.chatChannel?.readyState ?? null,
+        chatLabel: m?.chatChannel?.label ?? null,
+        file: m?.fileChannel?.readyState ?? null,
+        pc: m?.pc?.connectionState ?? null,
+        sig: m?.pc?.signalingState ?? null,
+      };
+    };
+
     // Initiator creates offer immediately if peer already present is handled by caller.
     // Caller should invoke sendOffer() when peer-joined arrives (or right away for joiner retry).
     return () => {
@@ -397,6 +455,11 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
       socket.off("webrtc-answer", onAnswer);
       socket.off("ice-candidate", onIce);
       socket.off("peer-left", onPeerLeft);
+      for (const t of transfersRef.current) {
+        if (t.blobUrl) {
+          try { URL.revokeObjectURL(t.blobUrl); } catch { /* noop */ }
+        }
+      }
       manager.cleanup("useWebRTC-effect-cleanup");
       managerRef.current = null;
     };
@@ -422,11 +485,12 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
           }
         }
       }
-      if (added && pc.localDescription && pc.remoteDescription) {
+      if (added && managerRef.current?.pc?.localDescription && managerRef.current?.pc?.remoteDescription) {
         void (async () => {
           try {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
+            const manager = managerRef.current;
+            if (!manager) return;
+            const offer = await manager.createOffer();
             socket.emit("webrtc-offer", { sessionId, offer });
           } catch (err) {
             console.warn("Renegotiation after adding tracks failed", err);
@@ -549,6 +613,14 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     (fileId: string) => {
       cancelledRef.current.add(fileId);
       updateTransfer(fileId, { status: "cancelled" });
+      const manager = managerRef.current;
+      if (manager?.fileChannel && manager.fileChannel.readyState === "open") {
+        try {
+          manager.fileChannel.send(JSON.stringify({ kind: "file-cancel", fileId }));
+        } catch {
+          /* noop */
+        }
+      }
     },
     [updateTransfer],
   );

@@ -1,3 +1,4 @@
+import { randomInt } from "crypto";
 import type { Session, WatchState, WatchPlaylistItem } from "../types/signaling.js";
 
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -6,7 +7,7 @@ const MAX_PEERS = 2;
 function randomSegment(length: number): string {
   let out = "";
   for (let i = 0; i < length; i++) {
-    out += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+    out += ALPHABET[randomInt(ALPHABET.length)];
   }
   return out;
 }
@@ -41,9 +42,31 @@ export class SessionManager {
     while (this.sessions.has(id)) {
       id = generateSessionId();
     }
-    const session: Session = { id, peers: [], peerNames: new Map(), watchState: createDefaultWatchState(), createdAt: Date.now() };
+    const session: Session = { id, peers: [], peerNames: new Map(), watchState: createDefaultWatchState(), createdAt: Date.now(), initiatorId: null };
     this.sessions.set(id, session);
     return session;
+  }
+
+  // Claim the initiator role for a joining/creating socket when the session
+  // has no live initiator, and promote the surviving peer when one leaves.
+  claimInitiator(sessionId: string, socketId: string): string {
+    const session = this.sessions.get(normalizeSessionId(sessionId));
+    if (!session) return socketId;
+    if (!session.initiatorId || !session.peers.includes(session.initiatorId)) {
+      session.initiatorId = socketId;
+    }
+    return session.initiatorId;
+  }
+
+  // After a peer leaves, hand the initiator role to the remaining peer.
+  // Returns the promoted socket id, or undefined when no promotion happened.
+  ensureInitiator(sessionId: string): string | undefined {
+    const session = this.sessions.get(normalizeSessionId(sessionId));
+    if (!session) return undefined;
+    if (session.initiatorId && session.peers.includes(session.initiatorId)) return undefined;
+    if (session.peers.length === 0) return undefined;
+    session.initiatorId = session.peers[0];
+    return session.initiatorId;
   }
 
   get(sessionId: string): Session | undefined {
@@ -134,6 +157,7 @@ export class SessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) return undefined;
     session.peers = session.peers.filter((id) => id !== socketId);
+    session.peerNames.delete(socketId);
     if (session.peers.length === 0) {
       if (this.cleanupTimers.has(sessionId)) {
         clearTimeout(this.cleanupTimers.get(sessionId));

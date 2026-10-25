@@ -19,6 +19,9 @@ export interface Session {
   peerNames: Map<string, string>;
   watchState: WatchState;
   createdAt: number;
+  // Socket id of the authoritative initiator (offer sender). Survives peer
+  // churn so simultaneous reloads can't leave both peers as answerers.
+  initiatorId: string | null;
 }
 
 export type SessionErrorReason = "invalid" | "full";
