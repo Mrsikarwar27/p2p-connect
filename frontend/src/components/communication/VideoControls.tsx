@@ -1,4 +1,4 @@
-import { Mic, MicOff, PhoneOff, Video, VideoOff, Paperclip, SwitchCamera, Monitor, MonitorUp, Maximize, Minimize } from "lucide-react";
+import { Mic, MicOff, PhoneOff, Video, VideoOff, Paperclip, SwitchCamera, MonitorUp, Maximize, Minimize } from "lucide-react";
 
 export function VideoControls({
   micOn,
@@ -6,7 +6,6 @@ export function VideoControls({
   onToggleMic,
   onToggleCamera,
   onSwitchCamera,
-  onWatchTogether,
   onShareFile,
   onEnd,
   canSwitchCamera = false,
@@ -69,11 +68,6 @@ export function VideoControls({
           }
         >
           <MonitorUp size={18} />
-        </button>
-      )}
-      {!hidePanelButtons && (
-        <button onClick={onWatchTogether} title="Watch Together" className={btn}>
-          <Monitor size={18} />
         </button>
       )}
       {onToggleFocus && (
