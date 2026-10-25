@@ -55,6 +55,21 @@ export function VideoPanel({
     },
     [isLocalMain, localStream, remoteStream],
   );
+
+  // While the local user shares their screen, both visible slots carry local
+  // content (screen main, camera PiP). The remote stream must keep exactly
+  // one playing element in EVERY state or its audio goes silent — this
+  // hidden sink takes over for the duration of the share (same-commit swap,
+  // no gap), and hands back to the visible element on stop.
+  const remoteSinkRef = useCallback(
+    (el: HTMLVideoElement | null) => {
+      if (el && remoteStream) {
+        el.srcObject = remoteStream;
+      }
+    },
+    [remoteStream],
+  );
+  const remoteOrphaned = pipStream !== undefined;
   const [localPos, setLocalPos] = useState({ x: 16, y: 16 });
   const [isDragging, setIsDragging] = useState(false);
   const dragOffset = useRef({ x: 0, y: 0 });
@@ -255,6 +270,9 @@ export function VideoPanel({
           <span className="h-2 w-2 rounded-full bg-red-400" />
           Screen shared
         </span>
+      )}
+      {remoteOrphaned && remoteStream && (
+        <video ref={remoteSinkRef} autoPlay playsInline className="hidden" />
       )}
     </div>
   );
