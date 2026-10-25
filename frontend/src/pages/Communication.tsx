@@ -236,7 +236,9 @@ export function Communication() {
       ? "connecting"
       : peer.connectionState;
 
-  const canSwitchCamera = typeof navigator !== "undefined" && navigator.mediaDevices?.getSupportedConstraints?.()?.facingMode === true;
+  // Switch button only makes sense with an actual second camera (re-checked
+  // on devicechange inside the media hook) — not a facingMode capability guess.
+  const canSwitchCamera = media.hasMultipleCameras;
 
   return (
     <CommunicationLayout

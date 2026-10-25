@@ -7,6 +7,7 @@ export interface MediaState {
   error: string | null;
   started: boolean;
   facingMode: "user" | "environment";
+  hasMultipleCameras: boolean;
 }
 
 export function useMediaStream(): MediaState & {
@@ -22,6 +23,7 @@ export function useMediaStream(): MediaState & {
   const [error, setError] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
   const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
+  const [videoInputCount, setVideoInputCount] = useState(0);
   const streamRef = useRef<MediaStream | null>(null);
   const deviceIdsRef = useRef<string[]>([]);
   const currentDeviceIndexRef = useRef(0);
@@ -42,12 +44,28 @@ export function useMediaStream(): MediaState & {
         .filter((d) => d.kind === "videoinput")
         .map((d) => d.deviceId);
       deviceIdsRef.current = videoDevices;
+      setVideoInputCount(videoDevices.length);
       return videoDevices;
     } catch {
       deviceIdsRef.current = [];
+      setVideoInputCount(0);
       return [];
     }
   }, []);
+
+  // Camera availability can change (external webcam plugged/unplugged),
+  // so re-check the real device list whenever devices change.
+  useEffect(() => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    const update = () => {
+      void enumerateVideoDevices();
+    };
+    update();
+    navigator.mediaDevices.addEventListener?.("devicechange", update);
+    return () => {
+      navigator.mediaDevices.removeEventListener?.("devicechange", update);
+    };
+  }, [enumerateVideoDevices]);
 
   const start = useCallback(async () => {
     setError(null);
@@ -239,60 +257,59 @@ export function useMediaStream(): MediaState & {
     }
   }, [cameraOn, facingMode]);
 
-  const switchCamera = useCallback(async () => {
+  const switchCamera = useCallback(async (): Promise<MediaStreamTrack | undefined> => {
     const s = streamRef.current;
     if (!s) return undefined;
 
-    const nextFacing = facingMode === "user" ? "environment" : "user";
+    // Capability check FIRST: count the real videoinput devices. With fewer
+    // than 2 cameras the switch is a complete no-op — getUserMedia is never
+    // called and the running track/stream are left untouched.
+    const devices = await enumerateVideoDevices();
+    if (devices.length < 2) {
+      setError("Only one camera available on this device.");
+      return undefined;
+    }
+
+    // Cycle through the ACTUAL deviceIds from enumerateDevices — no
+    // facingMode guesses.
+    currentDeviceIndexRef.current = (currentDeviceIndexRef.current + 1) % devices.length;
+    const nextDeviceId = devices[currentDeviceIndexRef.current];
+
     let newStream: MediaStream | null = null;
-    let newVideoTrack: MediaStreamTrack | null = null;
-
     try {
-      await enumerateVideoDevices();
-
-      // Request VIDEO ONLY (no audio)
-      let videoConstraints: boolean | MediaTrackConstraints = { facingMode: { ideal: nextFacing } };
-      if (deviceIdsRef.current.length > 1) {
-        currentDeviceIndexRef.current = (currentDeviceIndexRef.current + 1) % deviceIdsRef.current.length;
-        videoConstraints = { deviceId: { exact: deviceIdsRef.current[currentDeviceIndexRef.current] }, facingMode: undefined };
-      }
-      newStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
-      newVideoTrack = newStream.getVideoTracks()[0];
-
-      if (!newVideoTrack) {
-        throw new Error("No video track in new stream");
-      }
-      if (newVideoTrack.readyState !== "live") {
-        throw new Error("New video track not live");
+      newStream = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: nextDeviceId } },
+        audio: false,
+      });
+      const newVideoTrack = newStream.getVideoTracks()[0];
+      if (!newVideoTrack || newVideoTrack.readyState !== "live") {
+        throw new Error("New camera track not live");
       }
 
+      // SAFE ORDER — new track first, old track last. Everything that can
+      // fail has already succeeded above; only now is the old camera touched.
       const oldVideoTracks = s.getVideoTracks();
-
-      // Stop old tracks FIRST, then add new one (so stream never has two live video tracks)
-      oldVideoTracks.forEach((t) => t.stop());
-
       s.addTrack(newVideoTrack);
-      streamRef.current = s; // same stream object, updated tracks
-      setFacingMode(nextFacing);
+      oldVideoTracks.forEach((t) => s.removeTrack(t));
+      streamRef.current = s;
+      setFacingMode((f) => (f === "user" ? "environment" : "user"));
       setStream(new MediaStream(s.getTracks()));
       setCameraOn(true);
-
-      // Clean up temporary stream (audio tracks should be none, but guard anyway)
-      newStream.getAudioTracks().forEach((t) => t.stop());
-      newStream.getVideoTracks().forEach((t) => {
-        if (t !== newVideoTrack) t.stop();
-      });
-
+      setError(null);
+      // Stop the old camera only after the new one is live in the stream.
+      oldVideoTracks.forEach((t) => t.stop());
       return newVideoTrack;
     } catch (err) {
+      // Failed switch must be invisible in the video: the old camera keeps
+      // running completely untouched.
       console.warn("Camera switch failed", err);
-      setError("Could not switch camera. This device may not have a rear camera.");
       if (newStream) {
         newStream.getTracks().forEach((t) => t.stop());
       }
+      setError("Camera switch failed — other camera not available.");
       return undefined;
     }
-  }, [facingMode, enumerateVideoDevices]);
+  }, [enumerateVideoDevices]);
 
   useEffect(() => {
     return () => {
@@ -306,5 +323,5 @@ export function useMediaStream(): MediaState & {
     };
   }, []);
 
-  return { stream, micOn, cameraOn, error, started, facingMode, start, stop, toggleMic, toggleCamera, switchCamera };
+  return { stream, micOn, cameraOn, error, started, facingMode, hasMultipleCameras: videoInputCount >= 2, start, stop, toggleMic, toggleCamera, switchCamera };
 }
