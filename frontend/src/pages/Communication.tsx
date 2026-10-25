@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Minimize, MessageCircle } from "lucide-react";
 import { useSocket } from "../hooks/useSocket";
 import { useMediaStream } from "../hooks/useMediaStream";
 import { useWebRTC } from "../hooks/useWebRTC";
@@ -46,6 +46,11 @@ export function Communication() {
   const [peerName, setPeerName] = useState<string>("");
   const [isLocalMain, setIsLocalMain] = useState(false);
   const [showPlaylist, setShowPlaylist] = useState(false);
+  // Focus mode: pure layout state — never touches media/peer/senders.
+  const [focusMode, setFocusMode] = useState(false);
+  const [focusControlsVisible, setFocusControlsVisible] = useState(true);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const sessionRootRef = useRef<HTMLDivElement>(null);
 
   const peer = useWebRTC({
     socket,
@@ -80,6 +85,99 @@ export function Communication() {
   const handleWatchTogether = useCallback(() => {
     watch.togglePanel();
   }, [watch]);
+
+  const enterFocus = useCallback(() => {
+    setFocusMode(true);
+    // Native fullscreen is best-effort — the fixed-viewport layout works alone.
+    const req = sessionRootRef.current?.requestFullscreen();
+    req?.catch(() => {});
+  }, []);
+
+  const exitFocus = useCallback((openChat = false) => {
+    setFocusMode(false);
+    setUnreadCount(0);
+    if (document.fullscreenElement) {
+      document.exitFullscreen()?.catch(() => {});
+    }
+    if (openChat) {
+      // Chat sidebar just became visible again — show the latest message.
+      window.setTimeout(() => {
+        const scroller = document.querySelector<HTMLElement>("aside .overflow-y-auto");
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      }, 60);
+    }
+  }, []);
+
+  // Native fullscreen exit (browser Esc / F11) must also exit focus mode.
+  // One-directional sync — no feedback loop.
+  useEffect(() => {
+    const onFsChange = () => {
+      if (!document.fullscreenElement) setFocusMode(false);
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
+
+  // Esc exits focus mode when the browser isn't handling it via native fullscreen.
+  useEffect(() => {
+    if (!focusMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !document.fullscreenElement) setFocusMode(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focusMode]);
+
+  // YouTube-style auto-hide: controls fade (and cursor hides) after 2.5s idle.
+  useEffect(() => {
+    if (!focusMode) {
+      setFocusControlsVisible(true);
+      return;
+    }
+    setFocusControlsVisible(true);
+    let timer: number | undefined;
+    const bump = () => {
+      setFocusControlsVisible(true);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setFocusControlsVisible(false), 2500);
+    };
+    bump();
+    window.addEventListener("mousemove", bump);
+    window.addEventListener("touchstart", bump);
+    window.addEventListener("pointerdown", bump);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("mousemove", bump);
+      window.removeEventListener("touchstart", bump);
+      window.removeEventListener("pointerdown", bump);
+    };
+  }, [focusMode]);
+
+  // Hide the cursor together with the controls while idle in focus mode.
+  useEffect(() => {
+    if (!focusMode) {
+      document.body.style.cursor = "";
+      return;
+    }
+    document.body.style.cursor = focusControlsVisible ? "" : "none";
+    return () => {
+      document.body.style.cursor = "";
+    };
+  }, [focusMode, focusControlsVisible]);
+
+  // Unread chat badge: count remote messages that arrive during focus mode.
+  const remoteMessageCount = peer.messages.filter((m) => m.sender === "remote").length;
+  const prevRemoteCountRef = useRef(remoteMessageCount);
+  useEffect(() => {
+    // Compute the delta BEFORE setState: the functional updater runs later,
+    // when prevRemoteCountRef has already been updated — inside the updater
+    // the delta would always read 0.
+    const delta = remoteMessageCount - prevRemoteCountRef.current;
+    if (focusMode && delta > 0) {
+      setUnreadCount((u) => u + delta);
+    }
+    prevRemoteCountRef.current = remoteMessageCount;
+  }, [remoteMessageCount, focusMode]);
 
   // Join signaling session + wire initiator offer triggers
   useEffect(() => {
@@ -242,6 +340,8 @@ export function Communication() {
 
   return (
     <CommunicationLayout
+      focusMode={focusMode}
+      rootRef={sessionRootRef}
       header={
         <header className="border-b border-border bg-panel">
           <div className="mx-auto flex w-full max-w-7xl items-center justify-between px-3 py-3 sm:px-4">
@@ -287,8 +387,10 @@ export function Communication() {
             localName={localName}
             isLocalMain={isLocalMain}
             onSwapVideos={swapVideos}
+            focusMode={focusMode}
           />
-          <WatchTogetherPanel
+          <div className={focusMode ? "hidden" : ""}>
+            <WatchTogetherPanel
             watchState={watch.watchState}
             playerReady={watch.playerReady}
             error={watch.error}
@@ -311,6 +413,53 @@ export function Communication() {
             localName={localName}
             peerName={peerName}
           />
+          </div>
+          {focusMode && (
+            <div
+              className={`fixed inset-x-0 bottom-0 z-[90] flex items-end justify-between gap-3 px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] transition-opacity duration-300 ${
+                focusControlsVisible ? "opacity-100" : "pointer-events-none opacity-0"
+              }`}
+            >
+              <div className="flex-1" />
+              <div className="rounded-full border border-border bg-panel/90 px-2 backdrop-blur">
+                <VideoControls
+                  micOn={media.micOn}
+                  cameraOn={media.cameraOn}
+                  onToggleMic={media.toggleMic}
+                  onToggleCamera={media.toggleCamera}
+                  onSwitchCamera={handleSwitchCamera}
+                  onWatchTogether={handleWatchTogether}
+                  canSwitchCamera={canSwitchCamera && media.cameraOn}
+                  onShareFile={openFilePicker}
+                  onEnd={handleEnd}
+                  focusMode
+                  hidePanelButtons
+                  onToggleFocus={() => exitFocus()}
+                />
+              </div>
+              <div className="flex flex-col items-center gap-2">
+                <button
+                  onClick={() => exitFocus(true)}
+                  title="Open chat"
+                  className="relative flex h-11 w-11 items-center justify-center rounded-full border border-border bg-panel/90 text-ink backdrop-blur transition hover:brightness-125"
+                >
+                  <MessageCircle size={18} />
+                  {unreadCount > 0 && (
+                    <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+                      {unreadCount > 9 ? "9+" : unreadCount}
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={() => exitFocus()}
+                  title="Exit focus mode"
+                  className="flex h-11 w-11 items-center justify-center rounded-full border border-border bg-panel/90 text-ink backdrop-blur transition hover:brightness-125"
+                >
+                  <Minimize size={18} />
+                </button>
+              </div>
+            </div>
+          )}
         </>
       }
       controls={
@@ -330,6 +479,7 @@ export function Communication() {
             canSwitchCamera={canSwitchCamera && media.cameraOn}
             onShareFile={openFilePicker}
             onEnd={handleEnd}
+            onToggleFocus={enterFocus}
           />
         </>
       }

@@ -7,6 +7,7 @@ interface VideoPanelProps {
   localName?: string;
   isLocalMain: boolean;
   onSwapVideos: () => void;
+  focusMode?: boolean;
 }
 
 export function VideoPanel({
@@ -16,6 +17,7 @@ export function VideoPanel({
   localName,
   isLocalMain,
   onSwapVideos,
+  focusMode = false,
 }: VideoPanelProps) {
   const remoteRef = useRef<HTMLVideoElement | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -146,7 +148,14 @@ export function VideoPanel({
   };
 
   return (
-    <div className="relative min-h-[280px] flex-1 overflow-hidden rounded-2xl border border-border bg-black sm:min-h-[360px]" ref={containerRef}>
+    <div
+      className={
+        focusMode
+          ? "relative flex h-full min-h-0 w-full flex-1 overflow-hidden rounded-none border-0 bg-black"
+          : "relative min-h-[280px] flex-1 overflow-hidden rounded-2xl border border-border bg-black sm:min-h-[360px]"
+      }
+      ref={containerRef}
+    >
       {/* Main video (large) */}
       <div className="absolute inset-0">
         {mainVideoEnabled && mainVideoStream ? (
@@ -155,7 +164,7 @@ export function VideoPanel({
             autoPlay
             playsInline
             muted={isLocalMain}
-            className="absolute inset-0 h-full w-full object-cover"
+            className={`absolute inset-0 h-full w-full ${focusMode ? "object-contain" : "object-cover"}`}
             onClick={handleVideoClick}
           />
         ) : (
@@ -193,7 +202,10 @@ export function VideoPanel({
         onPointerDown={handlePointerDown}
         onClick={handleVideoClick}
       >
-        <div className="overflow-hidden rounded-xl border-2 border-white/20 bg-black shadow-xl" style={{ width: 120, height: 160 }}>
+        <div
+          className="overflow-hidden rounded-xl border-2 border-white/20 bg-black shadow-xl"
+          style={focusMode ? { width: 96, height: 128 } : { width: 120, height: 160 }}
+        >
           {previewVideoEnabled && previewVideoStream ? (
             <video
               ref={previewVideoRef}

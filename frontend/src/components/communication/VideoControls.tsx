@@ -1,4 +1,4 @@
-import { Mic, MicOff, PhoneOff, Video, VideoOff, Paperclip, SwitchCamera, Monitor } from "lucide-react";
+import { Mic, MicOff, PhoneOff, Video, VideoOff, Paperclip, SwitchCamera, Monitor, Maximize, Minimize } from "lucide-react";
 
 export function VideoControls({
   micOn,
@@ -10,6 +10,9 @@ export function VideoControls({
   onShareFile,
   onEnd,
   canSwitchCamera = false,
+  focusMode = false,
+  onToggleFocus,
+  hidePanelButtons = false,
 }: {
   micOn: boolean;
   cameraOn: boolean;
@@ -20,6 +23,9 @@ export function VideoControls({
   onShareFile: () => void;
   onEnd: () => void;
   canSwitchCamera?: boolean;
+  focusMode?: boolean;
+  onToggleFocus?: () => void;
+  hidePanelButtons?: boolean;
 }) {
   const btn =
     "flex h-11 w-11 items-center justify-center rounded-full border border-border bg-panel3 text-ink transition hover:brightness-125";
@@ -43,12 +49,25 @@ export function VideoControls({
           <SwitchCamera size={18} />
         </button>
       )}
-      <button onClick={onWatchTogether} title="Watch Together" className={btn}>
-        <Monitor size={18} />
-      </button>
-      <button onClick={onShareFile} title="Share file" className={btn}>
-        <Paperclip size={18} />
-      </button>
+      {!hidePanelButtons && (
+        <button onClick={onWatchTogether} title="Watch Together" className={btn}>
+          <Monitor size={18} />
+        </button>
+      )}
+      {onToggleFocus && (
+        <button
+          onClick={onToggleFocus}
+          title={focusMode ? "Exit focus mode" : "Focus mode"}
+          className={btn}
+        >
+          {focusMode ? <Minimize size={18} /> : <Maximize size={18} />}
+        </button>
+      )}
+      {!hidePanelButtons && (
+        <button onClick={onShareFile} title="Share file" className={btn}>
+          <Paperclip size={18} />
+        </button>
+      )}
       <button
         onClick={onEnd}
         title="End call"
