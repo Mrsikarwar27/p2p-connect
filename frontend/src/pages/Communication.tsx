@@ -60,9 +60,6 @@ export function Communication() {
   const [remoteSharing, setRemoteSharing] = useState(false);
   const [shareNotice, setShareNotice] = useState<string | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
-  const savedMicTrackRef = useRef<MediaStreamTrack | null>(null);
-  const audioReplacedRef = useRef(false);
-  const audioCtxRef = useRef<AudioContext | null>(null);
   const sharingActiveRef = useRef(false);
 
   const peer = useWebRTC({
@@ -102,18 +99,10 @@ export function Communication() {
   const stopScreenShare = useCallback(async () => {
     if (!sharingActiveRef.current) return; // idempotent
     sharingActiveRef.current = false;
-    // Remove ONLY the additional screen sender. The camera sender and camera
-    // track were never touched, so both cameras stay live after the share.
+    // Remove ONLY the additional screen senders. The camera and microphone
+    // senders were never touched, so voice keeps flowing unchanged.
     peer.removeScreenVideoTrack();
-    if (audioReplacedRef.current) {
-      const mic = savedMicTrackRef.current;
-      await peer.replaceAudioTrack(mic && mic.readyState === "live" ? mic : null);
-      audioReplacedRef.current = false;
-    }
-    if (audioCtxRef.current) {
-      await audioCtxRef.current.close().catch(() => {});
-      audioCtxRef.current = null;
-    }
+    peer.removeScreenAudioTrack();
     screenStreamRef.current?.getTracks().forEach((t) => {
       try {
         t.stop();
@@ -122,7 +111,6 @@ export function Communication() {
       }
     });
     screenStreamRef.current = null;
-    savedMicTrackRef.current = null;
     setIsSharing(false);
     socket.emit("screen-share-state", { sessionId, active: false });
   }, [peer, socket, sessionId]);
@@ -179,34 +167,28 @@ export function Communication() {
       setShareNotice("Could not add the screen share.");
       return;
     }
-    savedMicTrackRef.current = micTrack;
 
-    // Tab audio: mix mic + screen audio; fall back to screen audio alone;
-    // with no screen audio keep the mic untouched (video-only sharing).
-    const screenAudio = display.getAudioTracks()[0] ?? null;
+    // Tab / system audio from getDisplayMedia is a DIFFERENT track from the
+    // microphone. It keeps its own additional sender — the microphone sender
+    // is never replaced, never mixed and never re-encoded (no AudioContext,
+    // no gain nodes: that only added latency and muddied the voice).
+    let screenAudio: MediaStreamTrack | null = display.getAudioTracks()[0] ?? null;
+    if (screenAudio && micTrack && screenAudio.id === micTrack.id) {
+      // Same microphone track echoed back by the browser: send it once only.
+      try {
+        display.removeTrack(screenAudio);
+      } catch {
+        /* noop */
+      }
+      screenAudio = null;
+    }
     if (screenAudio) {
-      let replaced = false;
-      if (micTrack) {
-        try {
-          const ctx = new AudioContext();
-          const dest = ctx.createMediaStreamDestination();
-          ctx.createMediaStreamSource(new MediaStream([micTrack])).connect(dest);
-          ctx.createMediaStreamSource(new MediaStream([screenAudio])).connect(dest);
-          const mixed = dest.stream.getAudioTracks()[0];
-          replaced = await peer.replaceAudioTrack(mixed);
-          if (replaced) {
-            audioCtxRef.current = ctx;
-          } else {
-            await ctx.close().catch(() => {});
-          }
-        } catch {
-          // mixing failed — fall back below
-        }
+      const audioOk = await peer.addScreenAudioTrack(screenAudio, display);
+      if (!audioOk) {
+        setShareNotice(
+          "Sharing without tab audio. Share a browser tab and enable 'Share tab audio' to include sound.",
+        );
       }
-      if (!replaced) {
-        await peer.replaceAudioTrack(screenAudio);
-      }
-      audioReplacedRef.current = true;
     } else {
       setShareNotice(
         "Sharing without tab audio. Share a browser tab and enable 'Share tab audio' to include sound.",

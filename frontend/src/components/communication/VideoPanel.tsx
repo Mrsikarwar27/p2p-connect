@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { ChevronDown, ChevronLeft, ChevronRight, MonitorUp } from "lucide-react";
+import {
+  AUDIO_PRIORITY,
+  attachStreamToElement,
+  detachStreamFromElement,
+} from "../../utils/audioPlayback";
 
 interface VideoPanelProps {
   localStream: MediaStream | null;
@@ -109,41 +114,94 @@ export function VideoPanel({
 
   // Ref callbacks (not conditional rendering) own the srcObject assignment.
   // The <video> elements below stay mounted across every layout change, so
-  // their streams are never lost.
+  // their streams are never lost. Playback state (muted/volume) is applied by
+  // the single-playback registry on EVERY attach, so a re-attached srcObject
+  // can never make a local or duplicate element audible.
   const remoteVideoRef = useCallback(
     (el: HTMLVideoElement | null) => {
-      remoteRef.current = el;
-      if (el) el.srcObject = remoteStream ?? null;
+      if (el) {
+        remoteRef.current = el;
+        attachStreamToElement(
+          el,
+          remoteStream ?? null,
+          "remote",
+          AUDIO_PRIORITY.remoteCamera,
+        );
+      } else if (remoteRef.current) {
+        detachStreamFromElement(remoteRef.current);
+        remoteRef.current = null;
+      }
     },
     [remoteStream],
   );
 
   const localVideoRef = useCallback(
     (el: HTMLVideoElement | null) => {
-      localRef.current = el;
-      if (el) el.srcObject = localStream ?? null;
+      if (el) {
+        localRef.current = el;
+        // Local playback is always silent — the peer still receives the mic.
+        attachStreamToElement(el, localStream ?? null, "local", AUDIO_PRIORITY.local);
+      } else if (localRef.current) {
+        detachStreamFromElement(localRef.current);
+        localRef.current = null;
+      }
     },
     [localStream],
   );
 
   const screenVideoRef = useCallback(
     (el: HTMLVideoElement | null) => {
-      screenRef.current = el;
-      if (el) el.srcObject = screenStream ?? null;
+      if (el) {
+        screenRef.current = el;
+        // A local screen preview is silent. A remote screen stream is only a
+        // lower-priority audio carrier than the camera tile.
+        attachStreamToElement(
+          el,
+          screenStream ?? null,
+          screenIsLocal ? "local" : "remote",
+          screenIsLocal ? AUDIO_PRIORITY.local : AUDIO_PRIORITY.remoteScreen,
+        );
+      } else if (screenRef.current) {
+        detachStreamFromElement(screenRef.current);
+        screenRef.current = null;
+      }
     },
-    [screenStream],
+    [screenStream, screenIsLocal],
   );
 
   const pinnedVideoRef = useCallback(
     (el: HTMLVideoElement | null) => {
-      pinnedRef.current = el;
       if (el) {
-        el.srcObject =
-          mainCamera === "local" ? (localStream ?? null) : (remoteStream ?? null);
+        pinnedRef.current = el;
+        // The pinned stage may carry the same stream as a filmstrip tile —
+        // it is a picture only and always loses the audio to the tile.
+        attachStreamToElement(
+          el,
+          mainCamera === "local" ? (localStream ?? null) : (remoteStream ?? null),
+          mainCamera === "local" ? "local" : "remote",
+          mainCamera === "local" ? AUDIO_PRIORITY.local : AUDIO_PRIORITY.remotePinned,
+        );
+      } else if (pinnedRef.current) {
+        detachStreamFromElement(pinnedRef.current);
+        pinnedRef.current = null;
       }
     },
     [mainCamera, localStream, remoteStream],
   );
+
+  // Never leave a detached element registered as an audio owner.
+  useEffect(() => {
+    return () => {
+      for (const el of [
+        remoteRef.current,
+        localRef.current,
+        screenRef.current,
+        pinnedRef.current,
+      ]) {
+        if (el) detachStreamFromElement(el);
+      }
+    };
+  }, []);
 
   // ---- Derived liveness -------------------------------------------------
   const hasRemoteVideo = !!(

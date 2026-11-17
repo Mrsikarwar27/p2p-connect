@@ -66,8 +66,9 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteMediaRef = useRef(new MediaStream());
   const remoteScreenRef = useRef(new MediaStream());
-  // The dedicated screen sender — NEVER the camera sender.
+  // The dedicated screen senders — NEVER the camera/microphone senders.
   const screenSenderRef = useRef<RTCRtpSender | null>(null);
+  const screenAudioSenderRef = useRef<RTCRtpSender | null>(null);
   const roleRef = useRef(isInitiator);
   roleRef.current = isInitiator;
   const iceRestartRetries = useRef(0);
@@ -284,6 +285,7 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     remoteScreenRef.current = new MediaStream();
     setRemoteScreenStream(null);
     screenSenderRef.current = null;
+    screenAudioSenderRef.current = null;
 
     manager.onIceCandidate = (candidate) => {
       socket.emit("ice-candidate", {
@@ -340,35 +342,39 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     manager.onTrack = (ev) => {
       const ms = remoteMediaRef.current;
       const screenMs = remoteScreenRef.current;
-      const tracks = ev.streams[0]?.getTracks() ?? (ev.track ? [ev.track] : []);
+      const incoming = ev.streams[0]?.getTracks() ?? (ev.track ? [ev.track] : []);
       let cameraChanged = false;
       let screenChanged = false;
-      for (const track of tracks) {
+      for (const track of incoming) {
+        // A track is routed to exactly one remote stream. Without this guard a
+        // later ontrack event (same msid) re-examines already-routed tracks
+        // and can push the camera video into the screen bucket.
+        if (ms.getTracks().some((t) => t.id === track.id)) continue;
+        if (screenMs.getTracks().some((t) => t.id === track.id)) continue;
         // The camera sender is never replaced while sharing, so any additional
         // live video track is the screen track. Keep the streams separate.
         if (
           track.kind === "video" &&
           ms.getVideoTracks().some((t) => t.readyState === "live")
         ) {
-          if (!screenMs.getTracks().some((t) => t.id === track.id)) {
-            for (const old of screenMs.getVideoTracks()) {
-              if (old.id !== track.id) {
-                try {
-                  screenMs.removeTrack(old);
-                } catch {
-                  /* noop */
-                }
+          for (const old of screenMs.getVideoTracks()) {
+            if (old.id !== track.id) {
+              try {
+                screenMs.removeTrack(old);
+              } catch {
+                /* noop */
               }
             }
-            screenMs.addTrack(track);
-            screenChanged = true;
           }
+          screenMs.addTrack(track);
+          screenChanged = true;
           continue;
         }
-        if (!ms.getTracks().some((t) => t.id === track.id)) {
-          ms.addTrack(track);
-          cameraChanged = true;
-        }
+        // Camera video AND every audio track (microphone and genuine tab /
+        // system audio) live in ONE stream that ONE silent-by-policy video
+        // element plays — never two playback paths for the same track.
+        ms.addTrack(track);
+        cameraChanged = true;
       }
       // Create a new MediaStream wrapper so React re-renders (same ref would bail out).
       if (cameraChanged) setRemoteStream(new MediaStream(ms.getTracks()));
@@ -493,6 +499,29 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, socket]);
 
+  // Sender-side de-duplication: the same MediaStreamTrack must never be
+  // attached to two RTCRtpSenders (that sends — and is decoded — twice).
+  const dedupeSenderTracks = useCallback(() => {
+    const pc = managerRef.current?.pc;
+    if (!pc) return;
+    const seen = new Map<string, RTCRtpSender>();
+    for (const sender of pc.getSenders()) {
+      const id = sender.track?.id;
+      if (!id) continue;
+      if (!seen.has(id)) {
+        seen.set(id, sender);
+        continue;
+      }
+      if (sender === screenSenderRef.current) screenSenderRef.current = null;
+      if (sender === screenAudioSenderRef.current) screenAudioSenderRef.current = null;
+      try {
+        pc.removeTrack(sender);
+      } catch {
+        /* noop */
+      }
+    }
+  }, []);
+
   const setLocalStream = useCallback(
     (stream: MediaStream | null) => {
       localStreamRef.current = stream;
@@ -536,6 +565,7 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
           console.warn("addTrack failed", err);
         }
       }
+      dedupeSenderTracks();
       if (added && managerRef.current?.pc?.localDescription && managerRef.current?.pc?.remoteDescription) {
         void (async () => {
           try {
@@ -549,7 +579,7 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
         })();
       }
     },
-    [sessionId, socket],
+    [sessionId, socket, dedupeSenderTracks],
   );
 
   const findSenderFor = (kind: "video" | "audio") => {
@@ -559,7 +589,10 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
       pc
         .getSenders()
         .find(
-          (s) => s.track?.kind === kind && s !== screenSenderRef.current,
+          (s) =>
+            s.track?.kind === kind &&
+            s !== screenSenderRef.current &&
+            s !== screenAudioSenderRef.current,
         ) ??
       pc
         .getTransceivers()
@@ -567,7 +600,8 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
           (tr) =>
             tr.receiver.track?.kind === kind &&
             tr.direction !== "recvonly" &&
-            tr.sender !== screenSenderRef.current,
+            tr.sender !== screenSenderRef.current &&
+            tr.sender !== screenAudioSenderRef.current,
         )?.sender
     );
   };
@@ -614,6 +648,8 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     async (track: MediaStreamTrack, stream: MediaStream) => {
       const pc = managerRef.current?.pc;
       if (!pc) return false;
+      // Never send the same track twice.
+      if (pc.getSenders().some((s) => s.track?.id === track.id)) return true;
       try {
         screenSenderRef.current = pc.addTrack(track, stream);
         // addTrack sets the negotiation-needed flag; the pc's existing
@@ -641,6 +677,43 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     }
   }, []);
 
+  // Genuine tab / system audio from getDisplayMedia is a DIFFERENT track from
+  // the microphone. It gets its own ADDITIONAL audio sender; the microphone
+  // sender is never replaced, mixed or re-encoded.
+  const addScreenAudioTrack = useCallback(
+    async (track: MediaStreamTrack, stream: MediaStream) => {
+      const pc = managerRef.current?.pc;
+      if (!pc) return false;
+      // Never send the same track twice (e.g. the microphone track appearing
+      // again in the display stream).
+      if (pc.getSenders().some((s) => s.track?.id === track.id)) return true;
+      try {
+        if (screenAudioSenderRef.current) {
+          await screenAudioSenderRef.current.replaceTrack(track);
+          return true;
+        }
+        screenAudioSenderRef.current = pc.addTrack(track, stream);
+        return true;
+      } catch (err) {
+        console.error("addTrack (screen audio) failed", err);
+        return false;
+      }
+    },
+    [],
+  );
+
+  const removeScreenAudioTrack = useCallback(() => {
+    const sender = screenAudioSenderRef.current;
+    screenAudioSenderRef.current = null;
+    const pc = managerRef.current?.pc;
+    if (!pc || !sender) return;
+    try {
+      pc.removeTrack(sender);
+    } catch (err) {
+      console.warn("removeTrack (screen audio) failed", err);
+    }
+  }, []);
+
   // PART 4 teardown: close the pc, clear the remote stream, and reset ALL
   // negotiation state (flags/timers/queued ICE reset inside manager.cleanup
   // and here). Runs on peer-away/peer-left and before any rebuild.
@@ -660,6 +733,7 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     remoteScreenRef.current = new MediaStream();
     setRemoteScreenStream(null);
     screenSenderRef.current = null;
+    screenAudioSenderRef.current = null;
   }, []);
 
   // Attach the CURRENT local stream's tracks to the (fresh) pc. After a
@@ -676,7 +750,8 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
         /* already added */
       }
     }
-  }, []);
+    dedupeSenderTracks();
+  }, [dedupeSenderTracks]);
 
   // A pc that has NEVER negotiated (no local/remote description) is virgin —
   // a fresh page join already provides one, so an epoch rebuild must reuse it
@@ -845,6 +920,8 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     replaceAudioTrack,
     addScreenVideoTrack,
     removeScreenVideoTrack,
+    addScreenAudioTrack,
+    removeScreenAudioTrack,
     teardownPeer,
     rebuildForAnswer,
     rebuildAndOffer,

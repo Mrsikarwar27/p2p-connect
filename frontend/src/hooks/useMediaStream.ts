@@ -29,12 +29,21 @@ export function useMediaStream(): MediaState & {
   const currentDeviceIndexRef = useRef(0);
   const acquiringRef = useRef(false);
 
+  // Microphone processing is requested explicitly instead of relying on the
+  // browser defaults: acoustic echo cancellation, noise suppression and AGC
+  // must stay on for the whole call. Never re-requested during a share.
+  const MIC_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
+
   const getConstraints = (facing: "user" | "environment", deviceId?: string) => ({
     video: {
       facingMode: deviceId ? undefined : { ideal: facing },
       deviceId: deviceId ? { exact: deviceId } : undefined,
     },
-    audio: true,
+    audio: MIC_AUDIO_CONSTRAINTS,
   });
 
   const enumerateVideoDevices = useCallback(async () => {
@@ -92,7 +101,12 @@ export function useMediaStream(): MediaState & {
       for (const attempt of attempts) {
         try {
           const videoPart = attempt.video ? getConstraints(facingMode) : false;
-          const constraints: MediaStreamConstraints = videoPart ? { ...videoPart, audio: attempt.audio } : { video: false, audio: attempt.audio };
+          const constraints: MediaStreamConstraints = videoPart
+            ? { ...videoPart, audio: attempt.audio ? MIC_AUDIO_CONSTRAINTS : false }
+            : {
+                video: false,
+                audio: attempt.audio ? MIC_AUDIO_CONSTRAINTS : false,
+              };
           const s = await navigator.mediaDevices.getUserMedia(constraints);
           streamRef.current = s;
           setStream(s);
@@ -148,7 +162,7 @@ export function useMediaStream(): MediaState & {
           try {
             const audioStream = await navigator.mediaDevices.getUserMedia({
               video: false,
-              audio: true,
+              audio: MIC_AUDIO_CONSTRAINTS,
             });
             streamRef.current = audioStream;
             setStream(audioStream);
