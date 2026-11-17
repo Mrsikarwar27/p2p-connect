@@ -53,6 +53,9 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [transfers, setTransfers] = useState<FileTransferState[]>([]);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  // Screen-share video arrives as an ADDITIONAL video track (second m-line).
+  // It is kept out of remoteStream so the camera stream stays camera-only.
+  const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const managerRef = useRef<PeerConnectionManager | null>(null);
@@ -62,6 +65,9 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
   const cancelledRef = useRef(new Set<string>());
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteMediaRef = useRef(new MediaStream());
+  const remoteScreenRef = useRef(new MediaStream());
+  // The dedicated screen sender — NEVER the camera sender.
+  const screenSenderRef = useRef<RTCRtpSender | null>(null);
   const roleRef = useRef(isInitiator);
   roleRef.current = isInitiator;
   const iceRestartRetries = useRef(0);
@@ -275,6 +281,9 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
 
     remoteMediaRef.current = new MediaStream();
     setRemoteStream(remoteMediaRef.current);
+    remoteScreenRef.current = new MediaStream();
+    setRemoteScreenStream(null);
+    screenSenderRef.current = null;
 
     manager.onIceCandidate = (candidate) => {
       socket.emit("ice-candidate", {
@@ -330,14 +339,40 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
 
     manager.onTrack = (ev) => {
       const ms = remoteMediaRef.current;
+      const screenMs = remoteScreenRef.current;
       const tracks = ev.streams[0]?.getTracks() ?? (ev.track ? [ev.track] : []);
+      let cameraChanged = false;
+      let screenChanged = false;
       for (const track of tracks) {
+        // The camera sender is never replaced while sharing, so any additional
+        // live video track is the screen track. Keep the streams separate.
+        if (
+          track.kind === "video" &&
+          ms.getVideoTracks().some((t) => t.readyState === "live")
+        ) {
+          if (!screenMs.getTracks().some((t) => t.id === track.id)) {
+            for (const old of screenMs.getVideoTracks()) {
+              if (old.id !== track.id) {
+                try {
+                  screenMs.removeTrack(old);
+                } catch {
+                  /* noop */
+                }
+              }
+            }
+            screenMs.addTrack(track);
+            screenChanged = true;
+          }
+          continue;
+        }
         if (!ms.getTracks().some((t) => t.id === track.id)) {
           ms.addTrack(track);
+          cameraChanged = true;
         }
       }
       // Create a new MediaStream wrapper so React re-renders (same ref would bail out).
-      setRemoteStream(new MediaStream(ms.getTracks()));
+      if (cameraChanged) setRemoteStream(new MediaStream(ms.getTracks()));
+      if (screenChanged) setRemoteScreenStream(new MediaStream(screenMs.getTracks()));
     };
 
     manager.onDataChannel = (channel) => {
@@ -348,10 +383,14 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
 
     const pc = manager.create(roleRef.current);
     pc.onnegotiationneeded = () => {
-      // Only the initiator renegotiates to avoid glare.
-      if (!roleRef.current) return;
+      // Renegotiation is needed when the additional screen sender is added or
+      // removed. Either side may own that change, so both roles are allowed to
+      // offer; the manager's perfect-negotiation rollback handles collisions.
       void (async () => {
         try {
+          if (!manager.pc || manager.pc !== pc) return;
+          if (!pc.localDescription || !pc.remoteDescription) return;
+          if (pc.signalingState !== "stable") return;
           const offer = await manager.createOffer();
           socket.emit("webrtc-offer", { sessionId, offer });
         } catch (err) {
@@ -470,12 +509,19 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
             // Prefer swapping into the existing video sender: no new
             // m-line, so no renegotiation is needed for the new track.
             const videoSender =
-              pc.getSenders().find((s) => s.track?.kind === "video") ??
+              pc
+                .getSenders()
+                .find(
+                  (s) =>
+                    s.track?.kind === "video" && s !== screenSenderRef.current,
+                ) ??
               pc
                 .getTransceivers()
                 .find(
                   (tr) =>
-                    tr.receiver.track?.kind === "video" && tr.direction !== "recvonly",
+                    tr.receiver.track?.kind === "video" &&
+                    tr.direction !== "recvonly" &&
+                    tr.sender !== screenSenderRef.current,
                 )?.sender;
             if (videoSender) {
               void videoSender.replaceTrack(track).catch((err) => {
@@ -510,11 +556,18 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     const pc = managerRef.current?.pc;
     if (!pc) return undefined;
     return (
-      pc.getSenders().find((s) => s.track?.kind === kind) ??
+      pc
+        .getSenders()
+        .find(
+          (s) => s.track?.kind === kind && s !== screenSenderRef.current,
+        ) ??
       pc
         .getTransceivers()
         .find(
-          (tr) => tr.receiver.track?.kind === kind && tr.direction !== "recvonly",
+          (tr) =>
+            tr.receiver.track?.kind === kind &&
+            tr.direction !== "recvonly" &&
+            tr.sender !== screenSenderRef.current,
         )?.sender
     );
   };
@@ -555,6 +608,39 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     [],
   );
 
+  // Screen share is sent as an ADDITIONAL video sender. The camera sender is
+  // never replaced or stopped, so both cameras keep flowing during a share.
+  const addScreenVideoTrack = useCallback(
+    async (track: MediaStreamTrack, stream: MediaStream) => {
+      const pc = managerRef.current?.pc;
+      if (!pc) return false;
+      try {
+        screenSenderRef.current = pc.addTrack(track, stream);
+        // addTrack sets the negotiation-needed flag; the pc's existing
+        // onnegotiationneeded handler performs the (single) renegotiation.
+        return true;
+      } catch (err) {
+        console.error("addTrack (screen) failed", err);
+        return false;
+      }
+    },
+    [],
+  );
+
+  // Remove only the additional screen sender. Camera sender stays untouched.
+  const removeScreenVideoTrack = useCallback(() => {
+    const sender = screenSenderRef.current;
+    screenSenderRef.current = null;
+    const pc = managerRef.current?.pc;
+    if (!pc || !sender) return;
+    try {
+      pc.removeTrack(sender);
+      // removeTrack triggers the same onnegotiationneeded flow.
+    } catch (err) {
+      console.warn("removeTrack (screen) failed", err);
+    }
+  }, []);
+
   // PART 4 teardown: close the pc, clear the remote stream, and reset ALL
   // negotiation state (flags/timers/queued ICE reset inside manager.cleanup
   // and here). Runs on peer-away/peer-left and before any rebuild.
@@ -571,6 +657,9 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     setFileState("closed");
     remoteMediaRef.current = new MediaStream();
     setRemoteStream(remoteMediaRef.current);
+    remoteScreenRef.current = new MediaStream();
+    setRemoteScreenStream(null);
+    screenSenderRef.current = null;
   }, []);
 
   // Attach the CURRENT local stream's tracks to the (fresh) pc. After a
@@ -744,6 +833,7 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     messages,
     transfers,
     remoteStream,
+    remoteScreenStream,
     error,
     setError,
     sendMessage,
@@ -753,6 +843,8 @@ export function useWebRTC({ socket, sessionId, isInitiator, localName, peerName 
     setLocalStream,
     replaceVideoTrack,
     replaceAudioTrack,
+    addScreenVideoTrack,
+    removeScreenVideoTrack,
     teardownPeer,
     rebuildForAnswer,
     rebuildAndOffer,

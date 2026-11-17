@@ -1,149 +1,338 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import { ChevronDown, ChevronLeft, ChevronRight, MonitorUp } from "lucide-react";
 
 interface VideoPanelProps {
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
+  // Additional (screen-share) video stream. Kept separate from the camera
+  // streams so neither camera is ever replaced or hidden.
+  screenStream?: MediaStream | null;
+  screenIsLocal?: boolean;
+  shareActive?: boolean;
   cameraOn: boolean;
   localName?: string;
+  remoteName?: string;
   isLocalMain: boolean;
   onSwapVideos: () => void;
   focusMode?: boolean;
-  // While screen-sharing, the small PiP shows the local camera instead of
-  // the stream it would normally display in this slot.
-  pipStream?: MediaStream | null;
-  // A shared screen is the main content: letterbox (contain) + label.
-  sharedScreen?: boolean;
+}
+
+type PinTarget = "local" | "remote" | null;
+
+interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+function initials(name?: string) {
+  const n = (name ?? "").trim();
+  if (!n) return "P2P";
+  return n.slice(0, 2).toUpperCase();
+}
+
+function CameraPlaceholder({
+  name,
+  hint,
+  compact = false,
+}: {
+  name: string;
+  hint?: string;
+  compact?: boolean;
+}) {
+  return (
+    <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-panel3/70 text-muted">
+      <div
+        className={`flex items-center justify-center rounded-full bg-panel3 font-bold text-secondary ${
+          compact ? "h-9 w-9 text-xs" : "h-14 w-14 text-lg"
+        }`}
+      >
+        {initials(name)}
+      </div>
+      <span className={compact ? "px-1 text-center text-[10px] leading-tight" : "text-sm"}>
+        {name}
+      </span>
+      {hint && <span className="text-[10px] opacity-70">{hint}</span>}
+    </div>
+  );
 }
 
 export function VideoPanel({
   localStream,
   remoteStream,
+  screenStream,
+  screenIsLocal = false,
+  shareActive = false,
   cameraOn,
   localName,
+  remoteName,
   isLocalMain,
   onSwapVideos,
   focusMode = false,
-  pipStream,
-  sharedScreen = false,
 }: VideoPanelProps) {
   const remoteRef = useRef<HTMLVideoElement | null>(null);
-  const localVideoRef = useRef<HTMLVideoElement | null>(null);
-  const localWrapperRef = useRef<HTMLDivElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const localRef = useRef<HTMLVideoElement | null>(null);
+  const screenRef = useRef<HTMLVideoElement | null>(null);
+  const pinnedRef = useRef<HTMLVideoElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const remoteWrapRef = useRef<HTMLDivElement | null>(null);
+  const localWrapRef = useRef<HTMLDivElement | null>(null);
 
-  // Ref callbacks: the <video> elements unmount when the camera turns off and
-  // remount when it turns back on. A plain effect keyed on the stream would
-  // NOT re-run for the remounted element (same stream object), leaving it
-  // without srcObject — so assign here, on every attach (and whenever the
-  // callback identity changes because stream/swap changed).
-  const mainVideoRef = useCallback(
+  const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
+  // Filmstrip width as a percentage of the stage; remembered for this mount
+  // (i.e. the current session only).
+  const [stripPct, setStripPct] = useState(26);
+  const [stripCollapsed, setStripCollapsed] = useState(false);
+  const [mainCamera, setMainCamera] = useState<PinTarget>(null);
+  const [dividerDragging, setDividerDragging] = useState(false);
+
+  // A new share always starts on the shared screen, never on a pinned camera.
+  useEffect(() => {
+    if (!shareActive) setMainCamera(null);
+  }, [shareActive]);
+
+  // Measure the stage. Layout only — no media is touched.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      setContainerSize({ w: r.width, h: r.height });
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Ref callbacks (not conditional rendering) own the srcObject assignment.
+  // The <video> elements below stay mounted across every layout change, so
+  // their streams are never lost.
+  const remoteVideoRef = useCallback(
     (el: HTMLVideoElement | null) => {
       remoteRef.current = el;
-      if (el) {
-        el.srcObject = (isLocalMain ? localStream : remoteStream) ?? null;
-      }
-    },
-    [isLocalMain, localStream, remoteStream],
-  );
-
-  const previewVideoRef = useCallback(
-    (el: HTMLVideoElement | null) => {
-      localVideoRef.current = el;
-      if (el) {
-        el.srcObject = (isLocalMain ? remoteStream : localStream) ?? null;
-      }
-    },
-    [isLocalMain, localStream, remoteStream],
-  );
-
-  // While the local user shares their screen, both visible slots carry local
-  // content (screen main, camera PiP). The remote stream must keep exactly
-  // one playing element in EVERY state or its audio goes silent — this
-  // hidden sink takes over for the duration of the share (same-commit swap,
-  // no gap), and hands back to the visible element on stop.
-  const remoteSinkRef = useCallback(
-    (el: HTMLVideoElement | null) => {
-      if (el && remoteStream) {
-        el.srcObject = remoteStream;
-      }
+      if (el) el.srcObject = remoteStream ?? null;
     },
     [remoteStream],
   );
-  const remoteOrphaned = pipStream !== undefined;
 
-  // Floating self-view tile (only while the local user shares their screen).
-  // The camera track stays alive the whole time — this tile is preview-only.
-  const TILE_W = 120;
-  const TILE_H = 160;
-  const [shareTilePos, setShareTilePos] = useState<{ x: number; y: number } | null>(null);
-  const [isDraggingShareTile, setIsDraggingShareTile] = useState(false);
-  const shareTileRef = useRef<HTMLDivElement | null>(null);
-  const shareTileDragOffsetRef = useRef({ dx: 0, dy: 0 });
-  const shareTileInitRef = useRef(false);
-
-  const shareTileVideoRef = useCallback(
+  const localVideoRef = useCallback(
     (el: HTMLVideoElement | null) => {
-      if (el && pipStream) {
-        el.srcObject = pipStream;
-      }
+      localRef.current = el;
+      if (el) el.srcObject = localStream ?? null;
     },
-    [pipStream],
+    [localStream],
   );
 
-  // Default position: bottom-right, fully inside the video area with a
-  // margin; in focus mode sit above the auto-hide control bar.
-  useEffect(() => {
-    if (remoteOrphaned) {
-      if (!shareTileInitRef.current && containerRef.current) {
-        const rect = containerRef.current.getBoundingClientRect();
-        setShareTilePos({
-          x: Math.max(8, rect.width - TILE_W - 16),
-          y: Math.max(8, rect.height - TILE_H - (focusMode ? 120 : 40)),
-        });
-        shareTileInitRef.current = true;
+  const screenVideoRef = useCallback(
+    (el: HTMLVideoElement | null) => {
+      screenRef.current = el;
+      if (el) el.srcObject = screenStream ?? null;
+    },
+    [screenStream],
+  );
+
+  const pinnedVideoRef = useCallback(
+    (el: HTMLVideoElement | null) => {
+      pinnedRef.current = el;
+      if (el) {
+        el.srcObject =
+          mainCamera === "local" ? (localStream ?? null) : (remoteStream ?? null);
       }
+    },
+    [mainCamera, localStream, remoteStream],
+  );
+
+  // ---- Derived liveness -------------------------------------------------
+  const hasRemoteVideo = !!(
+    remoteStream &&
+    remoteStream.getVideoTracks().some((t) => t.readyState === "live")
+  );
+  const hasLocalVideo = !!(
+    localStream &&
+    localStream.getVideoTracks().some((t) => t.readyState === "live")
+  );
+  const remoteVideoVisible = hasRemoteVideo;
+  const localVideoVisible = hasLocalVideo && cameraOn;
+
+  const remoteLabel = remoteName?.trim() || "Participant";
+  const localLabel = localName?.trim() ? `${localName.trim()} (You)` : "You";
+
+  // ---- Share layout geometry -------------------------------------------
+  const shareMode = !!shareActive;
+  const isWide = containerSize.w === 0 || containerSize.w >= 640;
+  const stripVisible = shareMode && !stripCollapsed;
+  const dividerW = 10;
+  const stripW =
+    stripVisible && isWide
+      ? Math.round(
+          Math.max(0.18, Math.min(0.4, stripPct / 100)) * containerSize.w,
+        )
+      : 0;
+  const narrowStripH =
+    stripVisible && !isWide
+      ? Math.round(Math.min(150, Math.max(96, (containerSize.h || 400) * 0.24)))
+      : 0;
+  const mainW =
+    stripVisible && isWide
+      ? Math.max(0, containerSize.w - stripW - dividerW)
+      : containerSize.w;
+  const mainH =
+    stripVisible && !isWide
+      ? Math.max(0, containerSize.h - narrowStripH)
+      : containerSize.h;
+
+  let remoteTile: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  let localTile: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  if (stripVisible) {
+    if (isWide) {
+      const pad = 8;
+      const gap = 8;
+      const innerW = Math.max(0, stripW - pad * 2);
+      const maxTileH = Math.max(0, (containerSize.h - pad * 2 - gap) / 2);
+      const tileW = Math.max(0, Math.min(innerW, (maxTileH * 16) / 9));
+      const tileH = (tileW * 9) / 16;
+      const x = containerSize.w - stripW + (stripW - tileW) / 2;
+      remoteTile = { x, y: pad, w: tileW, h: tileH };
+      localTile = { x, y: pad + tileH + gap, w: tileW, h: tileH };
     } else {
-      shareTileInitRef.current = false;
-      setShareTilePos(null);
+      const pad = 6;
+      const gap = 8;
+      const availH = Math.max(0, narrowStripH - pad * 2);
+      const availW = Math.max(0, (containerSize.w - pad * 2 - gap) / 2);
+      const tileW = Math.max(0, Math.min(availW, (availH * 16) / 9));
+      const tileH = (tileW * 9) / 16;
+      const totalW = tileW * 2 + gap;
+      const x0 = (containerSize.w - totalW) / 2;
+      const y = containerSize.h - narrowStripH + pad + (availH - tileH) / 2;
+      remoteTile = { x: x0, y, w: tileW, h: tileH };
+      localTile = { x: x0 + tileW + gap, y, w: tileW, h: tileH };
     }
-  }, [remoteOrphaned, focusMode]);
+  }
 
-  const handleShareTilePointerDown = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
+  const mainAreaStyle: CSSProperties = {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    width: mainW,
+    height: mainH,
+    transform: "none",
+  };
+
+  const tileStyle = (r: Rect): CSSProperties =>
+    stripVisible
+      ? {
+          position: "absolute",
+          left: r.x,
+          top: r.y,
+          width: r.w,
+          height: r.h,
+          transform: "none",
+        }
+      : { position: "absolute", display: "none" };
+
+  // ---- Normal (non-share) layout ---------------------------------------
+  const [localPos, setLocalPos] = useState({ x: 16, y: 16 });
+  const [isDragging, setIsDragging] = useState(false);
+  const dragOffset = useRef({ x: 0, y: 0 });
+  const animationFrameRef = useRef<number | null>(null);
+  const pendingPosRef = useRef({ x: 16, y: 16 });
+
+  const previewW = focusMode ? 96 : 120;
+  const previewH = focusMode ? 128 : 160;
+
+  const getPreviewEl = () =>
+    isLocalMain ? remoteWrapRef.current : localWrapRef.current;
+
+  const handlePointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
       const container = containerRef.current;
-      if (!container || !shareTilePos) return;
+      const preview = getPreviewEl();
+      if (!container || !preview) return;
       e.preventDefault();
-      e.stopPropagation();
-      const rect = container.getBoundingClientRect();
-      shareTileDragOffsetRef.current = {
-        dx: e.clientX - rect.left - shareTilePos.x,
-        dy: e.clientY - rect.top - shareTilePos.y,
+      const localRect = preview.getBoundingClientRect();
+      dragOffset.current = {
+        x: e.clientX - localRect.left,
+        y: e.clientY - localRect.top,
       };
-      setIsDraggingShareTile(true);
-      e.currentTarget.setPointerCapture?.(e.pointerId);
+      setIsDragging(true);
+      preview.setPointerCapture?.(e.pointerId);
     },
-    [shareTilePos],
+    // getPreviewEl reads refs + isLocalMain
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isLocalMain],
   );
 
+  const updatePosition = useCallback(() => {
+    if (!isDragging) return;
+    const container = containerRef.current;
+    const preview = getPreviewEl();
+    if (!container || !preview) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const videoRect = preview.getBoundingClientRect();
+    const maxX = containerRect.width - videoRect.width;
+    const maxY = containerRect.height - videoRect.height;
+    const x = Math.max(0, Math.min(pendingPosRef.current.x, maxX));
+    const y = Math.max(0, Math.min(pendingPosRef.current.y, maxY));
+
+    preview.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+    pendingPosRef.current = { x, y };
+    setLocalPos({ x, y });
+    animationFrameRef.current = requestAnimationFrame(updatePosition);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDragging, isLocalMain]);
+
   useEffect(() => {
-    if (!isDraggingShareTile) return;
+    if (!isDragging) return;
+
     const move = (e: PointerEvent) => {
-      const container = containerRef.current;
-      const tile = shareTileRef.current;
-      if (!container || !tile) return;
-      const rect = container.getBoundingClientRect();
-      const { dx, dy } = shareTileDragOffsetRef.current;
-      // Clamp with the tile's FULL rendered size (box + label) so no part
-      // of it can ever leave the video area.
-      const tw = tile.offsetWidth || TILE_W;
-      const th = tile.offsetHeight || TILE_H;
-      const x = Math.min(Math.max(0, e.clientX - rect.left - dx), Math.max(0, rect.width - tw));
-      const y = Math.min(Math.max(0, e.clientY - rect.top - dy), Math.max(0, rect.height - th));
-      setShareTilePos({ x, y });
+      if (!containerRef.current) return;
+      const preview = getPreviewEl();
+      if (!preview) return;
+      const containerRect = containerRef.current.getBoundingClientRect();
+      pendingPosRef.current = {
+        x: e.clientX - containerRect.left - dragOffset.current.x,
+        y: e.clientY - containerRect.top - dragOffset.current.y,
+      };
     };
-    const up = () => {
-      setIsDraggingShareTile(false);
+
+    const up = (e: PointerEvent) => {
+      setIsDragging(false);
+      getPreviewEl()?.releasePointerCapture?.(e.pointerId);
+      setLocalPos(pendingPosRef.current);
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
     };
+
+    animationFrameRef.current = requestAnimationFrame(updatePosition);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDragging, updatePosition, isLocalMain]);
+
+  // ---- Filmstrip divider drag ------------------------------------------
+  useEffect(() => {
+    if (!dividerDragging) return;
+    const move = (e: PointerEvent) => {
+      const el = containerRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0) return;
+      const pct = ((r.right - e.clientX) / r.width) * 100;
+      setStripPct(Math.max(18, Math.min(40, pct)));
+    };
+    const up = () => setDividerDragging(false);
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", up);
@@ -152,121 +341,78 @@ export function VideoPanel({
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
     };
-  }, [isDraggingShareTile]);
-
-  const shareTileLive = !!(
-    pipStream &&
-    pipStream.getVideoTracks().some((t) => t.readyState === "live" && t.enabled) &&
-    cameraOn
-  );
-  const [localPos, setLocalPos] = useState({ x: 16, y: 16 });
-  const [isDragging, setIsDragging] = useState(false);
-  const dragOffset = useRef({ x: 0, y: 0 });
-  const animationFrameRef = useRef<number | null>(null);
-  const pendingPosRef = useRef({ x: 16, y: 16 });
-
-  const mainVideoStream = isLocalMain ? localStream : remoteStream;
-  const previewVideoStream = pipStream !== undefined ? pipStream : isLocalMain ? remoteStream : localStream;
-  // Muted rule stays: local content is always muted, remote stays unmuted.
-  const previewIsLocalContent = pipStream !== undefined || !isLocalMain;
-  const mainVideoEnabled = isLocalMain
-    ? (localStream && localStream.getVideoTracks().some((t) => t.readyState === "live") && (remoteOrphaned || cameraOn))
-    : (remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live"));
-  const previewVideoEnabled =
-    pipStream !== undefined
-      ? (pipStream && pipStream.getVideoTracks().some((t) => t.readyState === "live") && cameraOn)
-      : isLocalMain
-        ? (remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live"))
-        : (localStream && localStream.getVideoTracks().some((t) => t.readyState === "live") && cameraOn);
-  const previewCameraOn =
-    pipStream !== undefined
-      ? cameraOn
-      : isLocalMain
-        ? (remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live"))
-        : cameraOn;
-
-  const hasRemoteVideo = remoteStream && remoteStream.getVideoTracks().some((t) => t.readyState === "live");
-  const hasLocalVideo = localStream && localStream.getVideoTracks().some((t) => t.readyState === "live");
-  const localVideoEnabled = hasLocalVideo && cameraOn;
-
-  const handlePointerDown = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      if (!containerRef.current || !localWrapperRef.current) return;
-      e.preventDefault();
-      const containerRect = containerRef.current.getBoundingClientRect();
-      const localRect = localWrapperRef.current.getBoundingClientRect();
-      dragOffset.current = {
-        x: e.clientX - localRect.left,
-        y: e.clientY - localRect.top,
-      };
-      setIsDragging(true);
-      // Capture pointer for smooth dragging
-      localWrapperRef.current?.setPointerCapture?.(e.pointerId);
-    },
-    [],
-  );
-
-  const updatePosition = useCallback(() => {
-    if (!isDragging || !containerRef.current || !localWrapperRef.current) return;
-
-    const containerRect = containerRef.current.getBoundingClientRect();
-    const videoRect = localWrapperRef.current.getBoundingClientRect();
-    let x = pendingPosRef.current.x;
-    let y = pendingPosRef.current.y;
-
-    // Constrain within container
-    const maxX = containerRect.width - videoRect.width;
-    const maxY = containerRect.height - videoRect.height;
-    x = Math.max(0, Math.min(x, maxX));
-    y = Math.max(0, Math.min(y, maxY));
-
-    // Apply transform directly to avoid React re-renders
-    localWrapperRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
-    pendingPosRef.current = { x, y };
-    setLocalPos({ x, y }); // Keep state in sync for persistence
-
-    animationFrameRef.current = requestAnimationFrame(updatePosition);
-  }, [isDragging]);
-
-  useEffect(() => {
-    if (!isDragging) return;
-
-    const move = (e: PointerEvent) => {
-      if (!containerRef.current || !localWrapperRef.current) return;
-      const containerRect = containerRef.current.getBoundingClientRect();
-      const localRect = localWrapperRef.current.getBoundingClientRect();
-      let x = e.clientX - containerRect.left - dragOffset.current.x;
-      let y = e.clientY - containerRect.top - dragOffset.current.y;
-      pendingPosRef.current = { x, y };
-    };
-
-    const up = (e: PointerEvent) => {
-      setIsDragging(false);
-      localWrapperRef.current?.releasePointerCapture?.(e.pointerId);
-      // Sync final position to state
-      setLocalPos(pendingPosRef.current);
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-    };
-
-    // Start animation loop for smooth 60fps updates
-    animationFrameRef.current = requestAnimationFrame(updatePosition);
-
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    return () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-    };
-  }, [isDragging, updatePosition]);
+  }, [dividerDragging]);
 
   const handleVideoClick = () => {
+    if (shareMode) return;
     onSwapVideos();
   };
+
+  // Normal-mode ordering: one camera is the main stage, the other is the
+  // small draggable preview. The exact same wrappers/elements are reused in
+  // share mode, only repositioned.
+  const remoteIsMain = !isLocalMain;
+  const remoteWrapperStyle: CSSProperties = shareMode
+    ? tileStyle(remoteTile)
+    : remoteIsMain
+      ? {
+          position: "absolute",
+          left: 0,
+          top: 0,
+          width: "100%",
+          height: "100%",
+          transform: "none",
+        }
+      : {
+          position: "absolute",
+          left: 0,
+          top: 0,
+          width: previewW,
+          height: previewH,
+          transform: `translate3d(${localPos.x}px, ${localPos.y}px, 0)`,
+        };
+  const localWrapperStyle: CSSProperties = shareMode
+    ? tileStyle(localTile)
+    : !remoteIsMain
+      ? {
+          position: "absolute",
+          left: 0,
+          top: 0,
+          width: "100%",
+          height: "100%",
+          transform: "none",
+        }
+      : {
+          position: "absolute",
+          left: 0,
+          top: 0,
+          width: previewW,
+          height: previewH,
+          transform: `translate3d(${localPos.x}px, ${localPos.y}px, 0)`,
+        };
+
+  const remoteWrapperClass = shareMode
+    ? "z-10 overflow-hidden rounded-xl border border-white/20 bg-black shadow-lg cursor-pointer"
+    : remoteIsMain
+      ? "z-0 overflow-hidden bg-black cursor-pointer"
+      : `z-20 rounded-xl border-2 border-white/20 bg-black shadow-xl ${
+          isDragging ? "cursor-grabbing" : "cursor-grab"
+        }`;
+
+  const localWrapperClass = shareMode
+    ? "z-10 overflow-hidden rounded-xl border border-white/20 bg-black shadow-lg cursor-pointer"
+    : !remoteIsMain
+      ? "z-0 overflow-hidden bg-black cursor-pointer"
+      : `z-20 rounded-xl border-2 border-white/20 bg-black shadow-xl ${
+          isDragging ? "cursor-grabbing" : "cursor-grab"
+        }`;
+
+  const tileLabelClass =
+    "absolute bottom-2 left-2 z-20 max-w-[90%] truncate rounded bg-black/60 px-2 py-0.5 text-[10px] text-white/90";
+  const mainLabelClass =
+    "absolute left-3 top-3 z-20 rounded-md bg-black/60 px-2 py-1 text-[11px] text-white/90";
+  const previewLabelClass =
+    "absolute -bottom-5 left-1/2 z-20 -translate-x-1/2 whitespace-nowrap text-[10px] text-white/80";
 
   return (
     <div
@@ -277,127 +423,297 @@ export function VideoPanel({
       }
       ref={containerRef}
     >
-      {/* Main video (large) */}
-      <div className="absolute inset-0">
-        {mainVideoEnabled && mainVideoStream ? (
+      {/* Filmstrip background (behind tiles) */}
+      {stripVisible && isWide && (
+        <div
+          style={{
+            position: "absolute",
+            left: mainW,
+            top: 0,
+            width: stripW + dividerW,
+            height: containerSize.h,
+          }}
+          className="z-0 border-l border-border bg-panel2/70"
+        />
+      )}
+      {stripVisible && !isWide && (
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            top: mainH,
+            width: containerSize.w,
+            height: narrowStripH,
+          }}
+          className="z-0 border-t border-border bg-panel2/70"
+        />
+      )}
+
+      {/* Shared screen: main stage (new element; cameras below stay mounted) */}
+      {shareMode && screenStream && (
+        <div
+          style={{
+            ...mainAreaStyle,
+            display: mainCamera ? "none" : "block",
+          }}
+          className="z-0 overflow-hidden bg-black"
+          onClick={() => setMainCamera(null)}
+        >
           <video
-            ref={mainVideoRef}
+            ref={screenVideoRef}
             autoPlay
             playsInline
-            muted={isLocalMain}
-            className={`absolute inset-0 h-full w-full ${focusMode || sharedScreen ? "object-contain" : "object-cover"}`}
-            onClick={handleVideoClick}
+            muted
+            className="h-full w-full object-contain"
           />
-        ) : (
-          <div
-            className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-muted"
-            onClick={handleVideoClick}
-          >
-            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-panel3 text-2xl font-bold text-secondary">
-              P2P
-            </div>
-            <p className="text-sm">
-              {isLocalMain
-                ? localName
-                  ? `${localName}'s video`
-                  : "Your video"
-                : "Waiting for remote video..."}
-            </p>
-            {isLocalMain && !localVideoEnabled && (
-              <p className="text-xs opacity-70">Camera is off</p>
-            )}
-            {!isLocalMain && !hasRemoteVideo && (
-              <p className="text-xs opacity-70">Remote video appears here once the peer shares camera</p>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Preview video (small, draggable) — hidden while screen sharing;
-          the floating "You" tile takes over for the duration of the share. */}
-      {!remoteOrphaned && (
-      <div
-        ref={localWrapperRef}
-        style={{ transform: `translate3d(${localPos.x}px, ${localPos.y}px, 0)` }}
-        className={`absolute transition-transform duration-150 ${
-          isDragging ? "cursor-grabbing" : "cursor-grab"
-        }`}
-        onPointerDown={handlePointerDown}
-        onClick={handleVideoClick}
-      >
+          <p className={mainLabelClass}>
+            {screenIsLocal
+              ? "Your screen (main)"
+              : `${remoteName?.trim() || "Peer"}'s screen (main)`}
+          </p>
+          <span className="absolute right-3 top-3 z-20 flex items-center gap-1.5 rounded-full bg-black/60 px-3 py-1 text-[11px] font-medium text-white/90">
+            <span className="h-2 w-2 rounded-full bg-red-400" />
+            Screen shared
+          </span>
+        </div>
+      )}
+      {shareMode && !screenStream && !mainCamera && (
         <div
-          className="overflow-hidden rounded-xl border-2 border-white/20 bg-black shadow-xl"
-          style={focusMode ? { width: 96, height: 128 } : { width: 120, height: 160 }}
+          style={mainAreaStyle}
+          className="z-0 flex items-center justify-center bg-black text-sm text-muted"
         >
-          {previewVideoEnabled && previewVideoStream ? (
-            <video
-              ref={previewVideoRef}
-              autoPlay
-              playsInline
-              muted={previewIsLocalContent}
-              className={`h-full w-full object-cover ${previewCameraOn ? "" : "hidden"}`}
+          Waiting for shared screen…
+        </div>
+      )}
+
+      {/* Pinned camera in the main stage (share mode). A separate muted
+          element; the two live camera tiles stay mounted in the filmstrip. */}
+      {shareMode && mainCamera && (
+        <div
+          style={mainAreaStyle}
+          className="z-10 overflow-hidden bg-black"
+          onClick={() => setMainCamera(null)}
+        >
+          <video
+            ref={pinnedVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className="h-full w-full object-contain"
+          />
+          {mainCamera === "local" && !localVideoVisible && (
+            <CameraPlaceholder
+              name={localName?.trim() || "You"}
+              hint="Camera is off"
             />
-          ) : (
-            <div className="flex h-full w-full items-center justify-center text-xs text-muted">
-              {isLocalMain ? "Remote" : "You"} video
-            </div>
           )}
-          {(!previewVideoEnabled || !previewCameraOn) && (
-            <div className="absolute inset-0 flex items-center justify-center text-xs text-muted">
-              {previewCameraOn ? "Camera off" : "Camera Off"}
-            </div>
+          {mainCamera === "remote" && !remoteVideoVisible && (
+            <CameraPlaceholder name={remoteLabel} hint="Camera is off" />
           )}
+          <p className={mainLabelClass}>
+            {mainCamera === "local"
+              ? localName?.trim()
+                ? `${localName.trim()}'s video`
+                : "Your video"
+              : `${remoteLabel}'s video`}
+          </p>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setMainCamera(null);
+            }}
+            className="absolute right-3 top-3 z-20 flex items-center gap-1.5 rounded-full bg-black/70 px-3 py-1 text-[11px] font-medium text-white/90 transition hover:bg-black"
+          >
+            <MonitorUp size={13} />
+            Back to screen
+          </button>
         </div>
-        <p className="absolute -bottom-5 left-1/2 -translate-x-1/2 text-[10px] text-white/80 whitespace-nowrap">
-          {isLocalMain ? (localName ?? "Peer") : "Your Video"}
-        </p>
-      </div>
       )}
 
-      <p className="absolute left-3 top-3 rounded-md bg-black/60 px-2 py-1 text-[11px] text-white/90">
-        {isLocalMain ? (remoteOrphaned ? "Your screen (main)" : "Your Video (main)") : "Remote Video (main)"}
-      </p>
-      {sharedScreen && (
-        <span className="absolute right-3 top-3 flex items-center gap-1.5 rounded-full bg-black/60 px-3 py-1 text-[11px] font-medium text-white/90">
-          <span className="h-2 w-2 rounded-full bg-red-400" />
-          Screen shared
-        </span>
-      )}
-      {remoteOrphaned && shareTilePos && (
-        <div
-          ref={shareTileRef}
-          style={{ transform: `translate3d(${shareTilePos.x}px, ${shareTilePos.y}px, 0)` }}
-          onPointerDown={handleShareTilePointerDown}
-          className={`absolute left-0 top-0 z-20 select-none ${
-            isDraggingShareTile ? "cursor-grabbing" : "cursor-grab"
-          } touch-none`}
+      {/* Remote camera wrapper — ALWAYS mounted */}
+      <div
+        ref={remoteWrapRef}
+        style={remoteWrapperStyle}
+        className={remoteWrapperClass}
+        onPointerDown={
+          !shareMode && remoteIsMain === false ? handlePointerDown : undefined
+        }
+        onClick={
+          shareMode
+            ? () =>
+                setMainCamera((m) => (m === "remote" ? null : "remote"))
+            : handleVideoClick
+        }
+      >
+        {remoteStream && (
+          <video
+            ref={remoteVideoRef}
+            autoPlay
+            playsInline
+            className={`h-full w-full ${
+              shareMode
+                ? "object-cover"
+                : remoteIsMain
+                  ? focusMode
+                    ? "object-contain"
+                    : "object-cover"
+                  : "rounded-[10px] object-cover"
+            } ${remoteVideoVisible ? "" : "hidden"}`}
+          />
+        )}
+        {!remoteVideoVisible && (
+          <CameraPlaceholder
+            name={remoteLabel}
+            hint={shareMode ? undefined : "Camera is off"}
+            compact={shareMode || !remoteIsMain}
+          />
+        )}
+        <span
+          className={
+            shareMode
+              ? tileLabelClass
+              : remoteIsMain
+                ? mainLabelClass
+                : previewLabelClass
+          }
         >
-          <div
-            className="overflow-hidden rounded-xl border-2 border-white/20 bg-black shadow-xl"
-            style={{ width: 120, height: 160 }}
-          >
-            {shareTileLive ? (
-              <video
-                ref={shareTileVideoRef}
-                autoPlay
-                playsInline
-                muted
-                className="h-full w-full object-cover"
-              />
-            ) : (
-              <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-xs text-muted">
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-panel3 text-sm font-bold text-secondary">
-                  P2P
-                </div>
-                <span>Camera Off</span>
-              </div>
-            )}
-          </div>
-          <p className="mt-1 text-center text-[10px] text-white/80">You</p>
-        </div>
+          {shareMode
+            ? remoteLabel
+            : remoteIsMain
+              ? "Remote Video (main)"
+              : remoteLabel}
+        </span>
+      </div>
+
+      {/* Local camera wrapper — ALWAYS mounted */}
+      <div
+        ref={localWrapRef}
+        style={localWrapperStyle}
+        className={localWrapperClass}
+        onPointerDown={!shareMode && remoteIsMain ? handlePointerDown : undefined}
+        onClick={
+          shareMode
+            ? () =>
+                setMainCamera((m) => (m === "local" ? null : "local"))
+            : handleVideoClick
+        }
+      >
+        {localStream && (
+          <video
+            ref={localVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`h-full w-full ${
+              shareMode
+                ? "object-cover"
+                : !remoteIsMain
+                  ? focusMode
+                    ? "object-contain"
+                    : "object-cover"
+                  : "rounded-[10px] object-cover"
+            } ${localVideoVisible ? "" : "hidden"}`}
+          />
+        )}
+        {!localVideoVisible && (
+          <CameraPlaceholder
+            name={localName?.trim() || "You"}
+            hint={shareMode ? undefined : "Camera is off"}
+            compact={shareMode || remoteIsMain}
+          />
+        )}
+        <span
+          className={
+            shareMode
+              ? tileLabelClass
+              : !remoteIsMain
+                ? mainLabelClass
+                : previewLabelClass
+          }
+        >
+          {shareMode
+            ? localLabel
+            : !remoteIsMain
+              ? "Your Video (main)"
+              : "Your Video"}
+        </span>
+      </div>
+
+      {/* Collapse / expand button (CSS-only hide, elements stay mounted) */}
+      {shareMode && isWide && !stripCollapsed && (
+        <button
+          onClick={() => {
+            setMainCamera(null);
+            setStripCollapsed(true);
+          }}
+          title="Hide camera strip"
+          style={{
+            position: "absolute",
+            left: Math.max(0, mainW - 14),
+            top: 12,
+            zIndex: 40,
+          }}
+          className="flex h-7 w-7 items-center justify-center rounded-full border border-border bg-black/70 text-white/90 transition hover:bg-black"
+        >
+          <ChevronRight size={14} />
+        </button>
       )}
-      {remoteOrphaned && remoteStream && (
-        <video ref={remoteSinkRef} autoPlay playsInline className="hidden" />
+      {shareMode && !isWide && !stripCollapsed && (
+        <button
+          onClick={() => {
+            setMainCamera(null);
+            setStripCollapsed(true);
+          }}
+          title="Hide camera strip"
+          style={{
+            position: "absolute",
+            right: 12,
+            bottom: narrowStripH + 10,
+            zIndex: 40,
+          }}
+          className="flex h-7 w-7 items-center justify-center rounded-full border border-border bg-black/70 text-white/90 transition hover:bg-black"
+        >
+          <ChevronDown size={14} />
+        </button>
+      )}
+      {shareMode && stripCollapsed && (
+        <button
+          onClick={() => setStripCollapsed(false)}
+          title="Show camera strip"
+          style={{ position: "absolute", right: 12, bottom: 12, zIndex: 40 }}
+          className="flex items-center gap-1.5 rounded-full border border-border bg-black/70 px-3 py-1.5 text-[11px] font-medium text-white/90 transition hover:bg-black"
+        >
+          <ChevronLeft size={13} />
+          Cameras
+        </button>
+      )}
+
+      {/* Draggable divider: 18%–40% of the stage width */}
+      {shareMode && isWide && !stripCollapsed && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize camera strip"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setDividerDragging(true);
+            e.currentTarget.setPointerCapture?.(e.pointerId);
+          }}
+          style={{
+            position: "absolute",
+            left: mainW,
+            top: 0,
+            width: dividerW,
+            height: containerSize.h,
+            zIndex: 35,
+          }}
+          className={`touch-none select-none ${
+            dividerDragging ? "cursor-col-resize" : "cursor-col-resize"
+          }`}
+        >
+          <div className="mx-auto h-full w-[2px] bg-white/15" />
+        </div>
       )}
     </div>
   );

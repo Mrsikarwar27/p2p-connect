@@ -60,7 +60,6 @@ export function Communication() {
   const [remoteSharing, setRemoteSharing] = useState(false);
   const [shareNotice, setShareNotice] = useState<string | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
-  const savedCameraTrackRef = useRef<MediaStreamTrack | null>(null);
   const savedMicTrackRef = useRef<MediaStreamTrack | null>(null);
   const audioReplacedRef = useRef(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -103,10 +102,9 @@ export function Communication() {
   const stopScreenShare = useCallback(async () => {
     if (!sharingActiveRef.current) return; // idempotent
     sharingActiveRef.current = false;
-    // Restore the saved camera track (kept alive during sharing). If the
-    // camera was off before sharing, the same disabled track comes back.
-    const cam = savedCameraTrackRef.current;
-    await peer.replaceVideoTrack(cam && cam.readyState === "live" ? cam : null);
+    // Remove ONLY the additional screen sender. The camera sender and camera
+    // track were never touched, so both cameras stay live after the share.
+    peer.removeScreenVideoTrack();
     if (audioReplacedRef.current) {
       const mic = savedMicTrackRef.current;
       await peer.replaceAudioTrack(mic && mic.readyState === "live" ? mic : null);
@@ -124,7 +122,6 @@ export function Communication() {
       }
     });
     screenStreamRef.current = null;
-    savedCameraTrackRef.current = null;
     savedMicTrackRef.current = null;
     setIsSharing(false);
     socket.emit("screen-share-state", { sessionId, active: false });
@@ -160,16 +157,28 @@ export function Communication() {
       setShareNotice("Could not start screen sharing.");
       return;
     }
-    // Save the current tracks first; the camera track is NEVER stopped.
+    // Save the current mic; the camera track/sender are NEVER touched.
     const camTrack = media.stream?.getVideoTracks().find((t) => t.readyState === "live") ?? null;
     const micTrack = media.stream?.getAudioTracks().find((t) => t.readyState === "live") ?? null;
-    const videoOk = await peer.replaceVideoTrack(screenVideo);
-    if (!videoOk) {
-      display.getTracks().forEach((t) => t.stop());
+    if (!camTrack) {
+      display.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {
+          /* noop */
+        }
+      });
       setShareNotice("Start your camera before sharing your screen.");
       return;
     }
-    savedCameraTrackRef.current = camTrack;
+    // Send the screen as an ADDITIONAL video track. The camera sender keeps
+    // running untouched, so the peer sees the camera the whole time.
+    const videoOk = await peer.addScreenVideoTrack(screenVideo, display);
+    if (!videoOk) {
+      display.getTracks().forEach((t) => t.stop());
+      setShareNotice("Could not add the screen share.");
+      return;
+    }
     savedMicTrackRef.current = micTrack;
 
     // Tab audio: mix mic + screen audio; fall back to screen audio alone;
@@ -652,15 +661,23 @@ export function Communication() {
       video={
         <>
           <VideoPanel
-            localStream={isSharing ? screenStreamRef.current : media.stream}
+            localStream={media.stream}
             remoteStream={peer.remoteStream}
+            screenStream={
+              isSharing
+                ? screenStreamRef.current
+                : remoteSharing
+                  ? peer.remoteScreenStream
+                  : null
+            }
+            screenIsLocal={isSharing}
+            shareActive={isSharing || remoteSharing}
             cameraOn={media.cameraOn}
             localName={localName}
-            isLocalMain={isSharing ? true : isLocalMain}
+            remoteName={peerName}
+            isLocalMain={isLocalMain}
             onSwapVideos={swapVideos}
             focusMode={focusMode}
-            pipStream={isSharing ? media.stream : undefined}
-            sharedScreen={isSharing || remoteSharing}
           />
           <div className={focusMode ? "hidden" : ""}>
             <WatchTogetherPanel
