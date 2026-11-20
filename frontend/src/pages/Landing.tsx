@@ -5,8 +5,10 @@ import { useSocket } from "../hooks/useSocket";
 import { ConnectionCard } from "../components/connection/ConnectionCard";
 import { ConnectionId } from "../components/connection/ConnectionId";
 import { ConnectionStatus } from "../components/connection/ConnectionStatus";
+import { OnlineUsers } from "../components/online/OnlineUsers";
 import { useAuth } from "../context/AuthContext";
 import { getClientId, readRejoin } from "../utils/rejoin";
+import { readDirectCall } from "../utils/directCall";
 import type { ConnectionState } from "../types/webrtc";
 import type { SessionErrorEvent } from "../types/signaling";
 
@@ -14,7 +16,7 @@ export function Landing() {
   const socket = useSocket();
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, logout } = useAuth();
+  const { user, logout, initializing } = useAuth();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [joinId, setJoinId] = useState("");
   const [name, setName] = useState("");
@@ -31,15 +33,25 @@ export function Landing() {
   // Leave) skips the join form entirely. A "Session ended" notice means the
   // server confirmed the code is gone — show the form instead.
   useEffect(() => {
-    if (notice) return;
-    const saved = readRejoin();
-    if (saved?.code) {
-      navigate(`/session/${saved.code}`, { state: { name: saved.name } });
+    if (notice || initializing) return;
+    // Account-to-account calls restore first: their id lives only in this
+    // tab's sessionStorage and must never end up in the URL.
+    const direct = readDirectCall();
+    if (direct?.sessionId) {
+      navigate("/call", { replace: true });
       return;
+    }
+    // Accounts use direct calls only — never restore a guest code session.
+    if (!user) {
+      const saved = readRejoin();
+      if (saved?.code) {
+        navigate(`/session/${saved.code}`, { state: { name: saved.name } });
+        return;
+      }
     }
     // Prepare the per-tab identity early so the first join already carries it.
     getClientId();
-  }, [navigate, notice]);
+  }, [navigate, notice, user, initializing]);
 
   // Logged-in users get their saved account name pre-filled automatically.
   useEffect(() => {
@@ -140,6 +152,17 @@ export function Landing() {
         )}
       </div>
 
+      {initializing ? (
+        <div className="flex w-full flex-1 items-center justify-center py-6 text-sm text-muted">
+          Loading…
+        </div>
+      ) : user ? (
+        // Logged-in home: online users only. The session-code UI is never
+        // rendered for accounts.
+        <div className="flex w-full flex-1 flex-col items-center justify-center py-6">
+          <OnlineUsers />
+        </div>
+      ) : (
       <div className="flex w-full flex-1 flex-col items-center justify-center py-6">
         <div className="mb-6 text-center">
           <h1 className="font-display text-4xl font-extrabold tracking-tight text-ink">
@@ -243,6 +266,7 @@ export function Landing() {
           (offer, answer, ICE) and never receives your messages, files, audio or video.
         </p>
       </div>
+      )}
     </div>
   );
 }

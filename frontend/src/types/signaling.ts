@@ -2,6 +2,55 @@ export interface SessionCreatedEvent {
   sessionId: string;
 }
 
+// ---- Optional accounts: presence + direct (no-code) calls ----
+
+export interface OnlineUser {
+  userId: string;
+  name: string;
+  username: string;
+  busy: boolean;
+}
+
+export interface IncomingCallRequestEvent {
+  requestId: string;
+  callerUserId: string;
+  name: string;
+  username: string;
+}
+
+export interface CallRequestSentEvent {
+  requestId: string;
+  targetUserId: string;
+  name: string;
+}
+
+export interface CallRequestDeclinedEvent {
+  requestId: string;
+  name: string;
+}
+
+export interface CallRequestTimeoutEvent {
+  requestId: string;
+  peerName?: string;
+}
+
+export interface CallRequestCancelledEvent {
+  requestId: string;
+  reason?: "cancelled" | "accepted" | "disconnected";
+}
+
+export interface CallRequestErrorEvent {
+  reason: string;
+  message: string;
+}
+
+export interface CallStartedEvent {
+  sessionId: string;
+  role: "initiator" | "joiner";
+  peerUserId: string;
+  peerName: string;
+}
+
 export interface SessionJoinedEvent {
   sessionId: string;
   peerId: string;

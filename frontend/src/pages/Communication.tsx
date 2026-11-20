@@ -5,6 +5,7 @@ import { useSocket } from "../hooks/useSocket";
 import { useMediaStream } from "../hooks/useMediaStream";
 import { useWebRTC } from "../hooks/useWebRTC";
 import { useWatchTogether } from "../hooks/useWatchTogether";
+import { useAuth } from "../context/AuthContext";
 import { CommunicationLayout } from "../components/communication/CommunicationLayout";
 import { VideoPanel } from "../components/communication/VideoPanel";
 import { VideoControls } from "../components/communication/VideoControls";
@@ -12,7 +13,12 @@ import { WatchTogetherPanel } from "../components/communication/WatchTogetherPan
 import { ChatPanel } from "../components/communication/ChatPanel";
 import { MessageInput } from "../components/communication/MessageInput";
 import { FileTransferCard } from "../components/communication/FileTransferCard";
-import { getClientId, readRejoin, saveRejoin, clearRejoin } from "../utils/rejoin";
+import { getClientId, saveRejoin, clearRejoin } from "../utils/rejoin";
+import {
+  clearDirectCall,
+  saveDirectCall,
+  type DirectCallData,
+} from "../utils/directCall";
 import { supportsWebRTC, type ConnectionState } from "../types/webrtc";
 import type {
   PeerAwayEvent,
@@ -22,19 +28,31 @@ import type {
   SessionJoinedEvent,
 } from "../types/signaling";
 
-export function Communication() {
+interface CommunicationProps {
+  /** Present only for account-to-account calls (route /call). */
+  directCall?: DirectCallData;
+}
+
+export function Communication({ directCall }: CommunicationProps = {}) {
   const { sessionId: rawId } = useParams<{ sessionId: string }>();
-  const sessionId = (rawId ?? "").toUpperCase();
+  // Direct calls keep the id out of the URL: it comes from sessionStorage.
+  const sessionId = (directCall?.sessionId ?? rawId ?? "").toUpperCase();
   const location = useLocation();
   const navigate = useNavigate();
   const socket = useSocket();
   const media = useMediaStream();
+  const { user: authUser } = useAuth();
+  const directCallRef = useRef<DirectCallData | undefined>(directCall);
+  directCallRef.current = directCall;
 
   // Get name from router state (passed from Landing page)
-  const locationName = ((location.state as { name?: string } | null)?.name ?? "").trim();
-  const locationInitiator = Boolean(
-    (location.state as { isInitiator?: boolean } | null)?.isInitiator,
-  );
+  const locationName = (
+    directCall?.name ??
+    ((location.state as { name?: string } | null)?.name ?? "")
+  ).trim();
+  const locationInitiator = directCall
+    ? directCall.isInitiator
+    : Boolean((location.state as { isInitiator?: boolean } | null)?.isInitiator);
   // Authoritative role comes from signaling (survives refresh / direct URL open).
   // location.state is only a fallback for the instant after create.
   const [serverInitiator, setServerInitiator] = useState<boolean | null>(null);
@@ -332,7 +350,16 @@ export function Communication() {
       const key = `${socket.id}:${sessionId}:${clientId}`;
       if (!force && lastJoinKeyRef.current === key) return;
       lastJoinKeyRef.current = key;
-      saveRejoin({ code: sessionId, name: localNameRef.current, clientId });
+      // Direct calls must survive a refresh without ever exposing the id.
+      if (directCallRef.current) {
+        saveDirectCall({
+          sessionId,
+          isInitiator: directCallRef.current.isInitiator,
+          name: localNameRef.current,
+        });
+      } else {
+        saveRejoin({ code: sessionId, name: localNameRef.current, clientId });
+      }
       socket.emit("join-session", {
         sessionId,
         name: localNameRef.current,
@@ -403,6 +430,7 @@ export function Communication() {
       if (payload.reason === "invalid" && joinedRef.current) {
         // The server says the session is truly gone (grace window expired).
         clearRejoin();
+        clearDirectCall();
         navigate("/", { state: { notice: "Session ended." } });
         return;
       }
@@ -523,11 +551,13 @@ export function Communication() {
 
   const handleLeaveToLanding = useCallback(() => {
     clearRejoin();
+    clearDirectCall();
     navigate("/", { replace: true });
   }, [navigate]);
 
   const handleEnd = useCallback(() => {
     clearRejoin();
+    clearDirectCall();
     void stopScreenShareRef.current();
     socket.emit("leave-session", { sessionId });
     media.stop();
@@ -599,9 +629,12 @@ export function Communication() {
               <h1 className="font-display text-base font-extrabold">
                 P2P <span className="text-primary">Connect</span>
               </h1>
-              <span className="hidden rounded-md bg-panel3 px-2 py-1 font-mono text-[11px] tracking-widest text-muted sm:inline">
-                {sessionId}
-              </span>
+              {/* Logged-in (direct) calls never expose the session code. */}
+              {!authUser && (
+                <span className="hidden rounded-md bg-panel3 px-2 py-1 font-mono text-[11px] tracking-widest text-muted sm:inline">
+                  {sessionId}
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-3">
               {joined && peerName && (

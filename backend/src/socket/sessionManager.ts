@@ -55,13 +55,14 @@ export class SessionManager {
   //   b. empty slot                   -> NEW JOIN
   //   c. away slot (dead socket)      -> takeover (REJOIN)
   //   d. both slots connected         -> FULL
-  assignSlot(session: Session, socketId: string, clientId: string, name?: string): "rejoin" | "new" | "same" | "full" {
+  assignSlot(session: Session, socketId: string, clientId: string, name?: string, userId?: string): "rejoin" | "new" | "same" | "full" {
     const byClient = session.slots.find((s) => s && s.clientId === clientId);
     if (byClient) {
       if (byClient.socketId === socketId) {
         // Duplicate join from the SAME live socket — idempotent: refresh
         // stored name only, no epoch change, no partner notification.
         if (name) byClient.name = name;
+        if (userId) byClient.userId = userId;
         return "same";
       }
       // Genuine rejoin: new socket for a known member — bump the epoch.
@@ -69,12 +70,13 @@ export class SessionManager {
       byClient.state = "connected";
       byClient.awaySince = undefined;
       if (name) byClient.name = name;
+      if (userId) byClient.userId = userId;
       byClient.connectionEpoch += 1;
       return "rejoin";
     }
     const emptyIdx = session.slots.findIndex((s) => s === null);
     if (emptyIdx !== -1) {
-      session.slots[emptyIdx] = { clientId, socketId, name: name || undefined, state: "connected", connectionEpoch: 1 };
+      session.slots[emptyIdx] = { clientId, socketId, name: name || undefined, userId, state: "connected", connectionEpoch: 1 };
       return "new";
     }
     const away = session.slots.find((s) => s && s.state === "away");
@@ -83,12 +85,25 @@ export class SessionManager {
       away.clientId = clientId;
       away.socketId = socketId;
       away.name = name || away.name;
+      if (userId) away.userId = userId;
       away.state = "connected";
       away.awaySince = undefined;
       away.connectionEpoch += 1;
       return "rejoin";
     }
     return "full";
+  }
+
+  /**
+   * Busy = member of an active session. Derived from the session seats
+   * themselves (single source of truth), never from a parallel tracker.
+   */
+  isUserBusy(userId: string): boolean {
+    if (!userId) return false;
+    for (const session of this.sessions.values()) {
+      if (session.slots.some((s) => s && s.userId === userId)) return true;
+    }
+    return false;
   }
 
   slotBySocket(session: Session, socketId: string): SessionSlot | null {

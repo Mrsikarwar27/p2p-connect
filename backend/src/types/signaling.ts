@@ -22,6 +22,9 @@ export interface SessionSlot {
   clientId: string;
   socketId: string | null;
   name?: string;
+  // Account behind this seat, when the member is logged in. Used only for
+  // in-memory presence ("In a call") — never persisted.
+  userId?: string;
   state: MemberState;
   awaySince?: number;
   // Incremented ONLY when the slot's socketId actually changes (refresh,
@@ -37,6 +40,11 @@ export interface Session {
   deleteTimer?: NodeJS.Timeout;
   watchState: WatchState;
   createdAt: number;
+  // Direct (no-code) calls: both seats are reserved up front by the server.
+  // directJoined tracks which reserved sockets have actually entered the
+  // session page/room, so the offer is only sent to a mounted peer.
+  direct?: boolean;
+  directJoined?: Set<string>;
 }
 
 export type SessionErrorReason = "invalid" | "full";

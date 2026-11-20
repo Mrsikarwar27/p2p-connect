@@ -1,5 +1,7 @@
 import type { Server, Socket } from "socket.io";
 import { SessionManager, normalizeSessionId } from "./sessionManager.js";
+import { PresenceManager } from "./presence.js";
+import { DirectCallManager } from "./directCalls.js";
 import { resolveUserFromToken } from "../middleware/auth.js";
 import type { SocketUser } from "../types/auth.js";
 
@@ -37,6 +39,23 @@ interface WatchPayload {
 }
 
 export function setupSignaling(io: Server, sessions: SessionManager): void {
+  const presence = new PresenceManager();
+
+  // Presence is per-account and in memory only. Each authenticated socket
+  // receives the list WITHOUT itself; guest sockets are skipped entirely.
+  const broadcastPresence = (): void => {
+    for (const client of io.sockets.sockets.values()) {
+      const socketUser = client.data.user as SocketUser | undefined;
+      if (!socketUser) continue;
+      client.emit(
+        "online-users",
+        presence.list(socketUser.id, (userId) => sessions.isUserBusy(userId)),
+      );
+    }
+  };
+
+  const directCalls = new DirectCallManager(io, sessions, presence, broadcastPresence);
+
   io.on("connection", (socket: Socket) => {
     // Optional identity from the handshake: auth.token. Guests have none.
     // Resolved lazily (never blocking connection) so no event can be missed.
@@ -51,6 +70,8 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
             username: user.username,
           };
           socket.data.user = socketUser;
+          presence.add(socketUser, socket.id);
+          broadcastPresence();
           return socketUser;
         })
       : Promise.resolve(null);
@@ -63,11 +84,12 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       const name = typedName || user?.name || "";
       const clientId = payload?.clientId ?? socket.id;
       const session = sessions.create();
-      sessions.assignSlot(session, socket.id, clientId, name || undefined);
+      sessions.assignSlot(session, socket.id, clientId, name || undefined, user?.id);
       sessions.cancelDeleteTimer(session);
       socket.join(session.id);
       console.log(`[Signaling] Session created: ${session.id} (by ${socket.id} client=${clientId}) name="${name}"`);
       socket.emit("session-created", { sessionId: session.id });
+      if (user) broadcastPresence();
     });
 
     socket.on("join-session", async (payload: JoinPayload & { clientId?: string }) => {
@@ -97,7 +119,7 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       }
       // Signaling is routed by ROOM, never by stored socketId.
       socket.join(sessionId);
-      const result = sessions.assignSlot(session, socket.id, clientId, name || undefined);
+      const result = sessions.assignSlot(session, socket.id, clientId, name || undefined, user?.id);
       if (result === "full") {
         socket.leave(sessionId);
         console.log(`[Signaling] Join rejected (full): ${sessionId} (${socket.id})`);
@@ -109,9 +131,21 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
         return;
       }
       sessions.cancelDeleteTimer(session);
+      if (user) broadcastPresence();
       const mySlot = sessions.slotBySocket(session, socket.id);
       const partner = sessions.partnerOf(session, socket.id);
-      const partnerState = !partner ? "none" : partner.state === "away" ? "away" : "connected";
+      // Direct calls reserve both seats before either client navigates. A
+      // reserved seat only counts as "connected" once that socket has
+      // actually entered the room, so the initiator's offer never races a
+      // peer page that has not mounted yet.
+      let partnerState: "connected" | "away" | "none" = "none";
+      if (partner) {
+        if (partner.state === "away") {
+          partnerState = "away";
+        } else if (!session.direct || (partner.socketId && session.directJoined?.has(partner.socketId))) {
+          partnerState = "connected";
+        }
+      }
       // Role is derived ONCE from the stable seat: seat 0 is the initiator,
       // always, for first joins AND rejoins. It never flips.
       const initiator = session.slots[0] === mySlot;
@@ -144,10 +178,25 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
           timestamp: Date.now(),
         });
       }
+      const firstDirectJoin = session.direct ? !session.directJoined?.has(socket.id) : false;
+      if (session.direct) session.directJoined?.add(socket.id);
       if (!partner || !partner.socketId) return;
       // "same" = this socket re-joined its own live seat (StrictMode double
       // mount, manual rejoin button) — idempotent, never notify the partner.
-      if (result === "same") return;
+      if (result === "same") {
+        // Exception: the first real entry into a direct call. If the other
+        // reserved seat is already in the room, tell it the peer arrived so
+        // the initiator sends the (single) offer now.
+        if (firstDirectJoin && session.direct && session.directJoined?.has(partner.socketId)) {
+          socket.to(sessionId).emit("peer-joined", {
+            sessionId,
+            peerId: socket.id,
+            peerCount,
+            name,
+          });
+        }
+        return;
+      }
       const myEpoch = sessions.slotBySocket(session, socket.id)?.connectionEpoch ?? 1;
       if (result === "rejoin") {
         socket.to(sessionId).emit("peer-rejoined", {
@@ -231,6 +280,48 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       });
       // Free seat can be taken again; delete only when NO seats remain.
       sessions.scheduleDeleteIfIdle(session);
+      if (socket.data.user) broadcastPresence();
+    });
+
+    // ---- Optional accounts: presence + direct (no-code) calls ----
+    socket.on("presence-subscribe", async () => {
+      const user = await userPromise;
+      if (!user) return;
+      socket.emit(
+        "online-users",
+        presence.list(user.id, (userId) => sessions.isUserBusy(userId)),
+      );
+    });
+
+    socket.on(
+      "call-request",
+      async (payload: { targetUserId?: unknown; clientId?: unknown }) => {
+        const user = await userPromise;
+        if (!user) {
+          // Guests cannot use direct calls — enforced here, not just in the UI.
+          socket.emit("call-request-error", {
+            reason: "unauthenticated",
+            message: "Sign in to call other users.",
+          });
+          return;
+        }
+        directCalls.request(socket, user, payload?.targetUserId, payload?.clientId);
+      },
+    );
+
+    socket.on(
+      "call-request-response",
+      async (payload: { requestId?: unknown; action?: unknown; clientId?: unknown }) => {
+        const user = await userPromise;
+        if (!user) return;
+        directCalls.respond(socket, user, payload ?? {});
+      },
+    );
+
+    socket.on("call-request-cancel", async () => {
+      const user = await userPromise;
+      if (!user) return;
+      directCalls.cancel(socket, user);
     });
 
     // Watch Together events
@@ -277,6 +368,9 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
     });
 
     socket.on("disconnect", () => {
+      const presenceResult = presence.remove(socket.id);
+      directCalls.handleDisconnect(socket, presenceResult?.online ?? false);
+      broadcastPresence();
       const session = sessions.sessionOfSocket(socket.id);
       if (!session) return;
       const slot = sessions.markAway(session, socket.id);
