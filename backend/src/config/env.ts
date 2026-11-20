@@ -24,4 +24,9 @@ export const env = {
     return "http://localhost:5173";
   })(),
   nodeEnv: requireEnv("NODE_ENV", "development"),
+  // Optional: when absent the server still runs, guest calling works, and
+  // only the auth endpoints report themselves as unavailable (503).
+  mongodbUri: process.env.MONGODB_URI?.trim() ?? "",
+  jwtSecret: process.env.JWT_SECRET?.trim() ?? "",
+  jwtExpiresIn: process.env.JWT_EXPIRES_IN?.trim() || "7d",
 };

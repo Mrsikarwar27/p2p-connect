@@ -15,6 +15,12 @@ services:
         generateValue: false
       - key: CLIENT_URL
         value: https://p2p-connect-wpwy.onrender.com
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_EXPIRES_IN
+        value: 7d
       - key: VITE_TURN_URL
         sync: false
       - key: VITE_TURN_USERNAME

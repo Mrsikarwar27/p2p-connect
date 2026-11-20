@@ -1,5 +1,7 @@
 import type { Server, Socket } from "socket.io";
 import { SessionManager, normalizeSessionId } from "./sessionManager.js";
+import { resolveUserFromToken } from "../middleware/auth.js";
+import type { SocketUser } from "../types/auth.js";
 
 interface CreatePayload {
   name?: string;
@@ -36,8 +38,29 @@ interface WatchPayload {
 
 export function setupSignaling(io: Server, sessions: SessionManager): void {
   io.on("connection", (socket: Socket) => {
-    socket.on("create-session", (payload: CreatePayload & { clientId?: string }) => {
-      const name = payload?.name?.trim() ?? "";
+    // Optional identity from the handshake: auth.token. Guests have none.
+    // Resolved lazily (never blocking connection) so no event can be missed.
+    const rawToken = (socket.handshake.auth as { token?: unknown } | undefined)?.token;
+    const token = typeof rawToken === "string" ? rawToken.trim() : "";
+    const userPromise: Promise<SocketUser | null> = token
+      ? resolveUserFromToken(token).then((user) => {
+          if (!user) return null;
+          const socketUser: SocketUser = {
+            id: user.id,
+            name: user.name,
+            username: user.username,
+          };
+          socket.data.user = socketUser;
+          return socketUser;
+        })
+      : Promise.resolve(null);
+
+    socket.on("create-session", async (payload: CreatePayload & { clientId?: string }) => {
+      const user = await userPromise;
+      const typedName = payload?.name?.trim() ?? "";
+      // A logged-in user's account name is the default display name, but a
+      // name they typed explicitly always wins.
+      const name = typedName || user?.name || "";
       const clientId = payload?.clientId ?? socket.id;
       const session = sessions.create();
       sessions.assignSlot(session, socket.id, clientId, name || undefined);
@@ -47,10 +70,12 @@ export function setupSignaling(io: Server, sessions: SessionManager): void {
       socket.emit("session-created", { sessionId: session.id });
     });
 
-    socket.on("join-session", (payload: JoinPayload & { clientId?: string }) => {
+    socket.on("join-session", async (payload: JoinPayload & { clientId?: string }) => {
+      const user = await userPromise;
       const rawId = payload?.sessionId ?? "";
       const sessionId = normalizeSessionId(rawId);
-      const name = payload?.name?.trim() ?? "";
+      const typedName = payload?.name?.trim() ?? "";
+      const name = typedName || user?.name || "";
       const clientId = payload?.clientId ?? socket.id;
       if (!sessionId) {
         socket.emit("session-error", {

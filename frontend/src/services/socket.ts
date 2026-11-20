@@ -1,4 +1,5 @@
 import { io, type Socket } from "socket.io-client";
+import { readStoredToken } from "../utils/authStorage";
 
 let socketInstance: Socket | null = null;
 
@@ -16,6 +17,7 @@ export function createSocket(): Socket {
     socketInstance.disconnect();
   }
   const url = getSignalingUrl();
+  const token = readStoredToken();
   socketInstance = io(url, {
     transports: ["websocket", "polling"],
     autoConnect: true,
@@ -23,8 +25,27 @@ export function createSocket(): Socket {
     reconnectionDelay: 1000,
     reconnectionDelayMax: 5000,
     reconnectionAttempts: Infinity,
+    // Optional identity. Without a token the handshake is exactly the guest
+    // handshake the app has always used.
+    auth: token ? { token } : {},
   });
   return socketInstance;
+}
+
+/**
+ * Applies a token to the existing socket. Only reconnects when the token
+ * actually changes, so guest sessions are never disturbed.
+ */
+export function setSocketToken(token: string | null): void {
+  if (!socketInstance) return;
+  const next = token ?? "";
+  const current = (socketInstance.auth as { token?: string }).token ?? "";
+  if (current === next) return;
+  socketInstance.auth = next ? { token: next } : {};
+  if (socketInstance.connected) {
+    socketInstance.disconnect();
+    socketInstance.connect();
+  }
 }
 
 export function getSocket(): Socket {

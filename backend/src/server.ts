@@ -6,7 +6,9 @@ import { fileURLToPath } from "url";
 import { dirname, join, resolve } from "path";
 import { existsSync } from "fs";
 import { env } from "./config/env.js";
+import { connectDatabase } from "./config/db.js";
 import { errorHandler } from "./middleware/errorHandler.js";
+import { authRouter } from "./routes/auth.js";
 import { SessionManager } from "./socket/sessionManager.js";
 import { setupSignaling } from "./socket/signaling.js";
 
@@ -24,6 +26,10 @@ app.use(
   }),
 );
 app.use(express.json());
+
+// Optional accounts. Guests never touch these routes; if auth is not
+// configured they return 503 and the rest of the app is unaffected.
+app.use("/api/auth", authRouter);
 
 // Serve frontend static files in production
 if (env.nodeEnv === "production") {
@@ -62,6 +68,12 @@ const io = new Server(httpServer, {
 const sessions = new SessionManager();
 setupSignaling(io, sessions);
 
-httpServer.listen(env.port, () => {
-  console.log(`[signaling] listening on :${env.port} (client: ${env.clientUrl})`);
-});
+async function start(): Promise<void> {
+  // Never fatal: without a database the server still runs for guests.
+  await connectDatabase();
+  httpServer.listen(env.port, () => {
+    console.log(`[signaling] listening on :${env.port} (client: ${env.clientUrl})`);
+  });
+}
+
+void start();
